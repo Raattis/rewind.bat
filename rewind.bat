@@ -39,7 +39,7 @@ exit 0
 
 :batch_bootstrap_builder
 @echo off
-set compiler_executable=tcc.exe
+set compiler_executable=tcc\tcc.exe
 set compiler_zip_name=tcc-0.9.27-win64-bin.zip
 set download_tcc=n
 if not exist %compiler_executable% if not exist %compiler_zip_name% set /P download_tcc="Download Tiny C Compiler? Please, try to avoid unnecessary redownloading. [y/n] "
@@ -76,27 +76,15 @@ if not exist %compiler_executable% (
 		)
 	)
 
-	if not exist %compiler_executable% (
-		echo Moving files from .\tcc\* to .\*
-		robocopy /NJH /NJS /NS /NC /NFL /NDL /NP /MOVE /E tcc .
-
-		if not exist %compiler_executable% (
-			echo %compiler_executable% still not found.
-			echo Download Tiny C Compiler manually and unzip it here.
-			pause
-			exit 1
-		)
-	)
-
 	echo Tiny C Compiler Acquired!
-) 
+)
 
 (
 	echo static const char* b_source_filename = "%~n0%~x0";
 	echo #line 0 "%~n0%~x0"
 	echo #if GOTO_BOOTSTRAP_BUILDER
 	type %~n0%~x0
-) | %compiler_executable% -run -nostdlib -lmsvcrt -lkernel32 -luser32 -nostdinc -Iinclude -Iinclude/winapi -bench -Ilibtcc -Llibtcc -llibtcc -DSHARED_PREFIX -DSOURCE - %~n0%~x0
+) | %compiler_executable% -run -nostdlib -lmsvcrt -lkernel32 -luser32 -nostdinc -Itcc/include -Itcc/include/winapi -bench -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE - %~n0%~x0
 @exit ERRORLEVEL
 */
 #endif // BOOTSTRAP_BUILDER
@@ -137,6 +125,7 @@ typedef struct
 ///////////////////////////////////////////////////////////////////////////////
 
 #ifdef SOURCE
+#define SEGMENT_NAME "SOURCE"
 
 #include <stdio.h>
 #include <windows.h>
@@ -144,10 +133,6 @@ typedef struct
 #include <time.h>
 
 #include <libtcc.h>
-
-enum { debug_printing_verbose = 1 };
-
-#define SEGMENT_NAME "SOURCE"
 
 typedef struct stat file_timestamp;
 
@@ -175,8 +160,7 @@ int cmp_and_swap_timestamps(file_timestamp* stamp1, const char* file)
 
 size_t scan_includes(const char* source_file, char** files_to_watch, size_t files_to_watch_count, size_t written)
 {
-	if (debug_printing_verbose)
-		printf("scan_includes('%s', %lld)\n", source_file, written);
+	trace_printf("scan_includes('%s', %lld)\n", source_file, written);
 
 	char buffer[1024] = {0};
 
@@ -236,8 +220,7 @@ size_t scan_includes(const char* source_file, char** files_to_watch, size_t file
 
 size_t find_corresponding_source_files(const char** includes, size_t includes_count, char** sources, size_t sources_count, size_t written_sources)
 {
-	if (debug_printing_verbose)
-		printf("find_corresponding_source_files(%lld, %lld)\n", includes_count, written_sources);
+	trace_printf("find_corresponding_source_files(%lld, %lld)\n", includes_count, written_sources);
 
 	char buffer[1024] = {0};
 	for (int i = 0; i < includes_count && written_sources < sources_count; ++i)
@@ -296,8 +279,7 @@ void get_headers_and_sources(const char* main_source_file, struct headers_and_so
 	for (size_t i = 0; i < headers_and_sources->sources_count; ++i)
 	{
 		const char* source = headers_and_sources->sources[i];
-		if (debug_printing_verbose)
-			printf("Scanning '%s'\n", source);
+		trace_printf("Scanning '%s'\n", source);
 
 		size_t prev_headers_count = headers_and_sources->headers_count;
 
@@ -358,6 +340,19 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 Window_Message_Handler_Func get_window_message_handler()
 {
 	return &window_message_handler;
+}
+
+void wait_for_change(file_timestamp* newest_file_timestamp, struct headers_and_sources* headers_and_sources)
+{
+	// Timeout is around 30 seconds
+
+	for (int i = 0; i < 300; i += 1)
+	{
+		Sleep(100);
+
+		if (get_any_newer_file_timestamp(newest_file_timestamp, headers_and_sources))
+			return;
+	}
 }
 
 void run_recompilation_loop()
@@ -452,7 +447,7 @@ void run_recompilation_loop()
 			if (-1 == tcc_compile_string(s, source_buffer))
 			{
 				trace_printf("Failed to recompile '%s'.\n", b_source_filename);
-				Sleep(5000);
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
@@ -461,7 +456,7 @@ void run_recompilation_loop()
 			if (size < 0)
 			{
 				fprintf(stderr, "Failed get size for relocate (=linking). Err: %d\n", size);
-				Sleep(5000);
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 			else
@@ -471,10 +466,10 @@ void run_recompilation_loop()
 					if (size > 1024 * 1024 * 1024)
 					{
 						fprintf(stderr, "Sanity check failed: Compilation result is %d bytes which is more than 1 GB.\n", size);
-						Sleep(5000);
+						wait_for_change(&newest_file_timestamp, headers_and_sources);
 						continue;
 					}
-					
+
 					free(compilation_result_buffer);
 					compilation_result_buffer_size = size;
 					compilation_result_buffer = malloc(compilation_result_buffer_size);
@@ -486,7 +481,7 @@ void run_recompilation_loop()
 			if (!VirtualProtect(compilation_result_buffer, compilation_result_buffer_size, PAGE_READWRITE, &old))
 			{
 				fprintf(stderr, "Couldn't unlock page protection. Old protection value: %d", old);
-				Sleep(5000);
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 #else
@@ -498,7 +493,7 @@ void run_recompilation_loop()
 			if (0 > (err = tcc_relocate(s, compilation_result_buffer)))
 			{
 				fprintf(stderr, "Failed to relocate (=link). Err: %d\n", err);
-				Sleep(5000);
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
@@ -509,7 +504,7 @@ void run_recompilation_loop()
 			if (!update)
 			{
 				fprintf(stderr, "Failed to load the 'void update(Communication*)' symbol after recompilation.\n");
-				Sleep(5000);
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
@@ -517,7 +512,7 @@ void run_recompilation_loop()
 			if (!window_message_handler_impl)
 			{
 				fprintf(stderr, "Failed to load the 'window_message_handler_impl' symbol after recompilation.\n");
-				Sleep(5000);
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
@@ -572,40 +567,49 @@ void _runmain() { _start(); }
 ///////////////////////////////////////////////////////////////////////////////
 
 #ifdef RUNTIME_LOOP
+#define SEGMENT_NAME "RUNTIME_LOOP"
 
 #include <stdio.h>
 #include <windows.h>
 #include <time.h>
 
-#define SEGMENT_NAME "RUNTIME_LOOP"
-
-enum { TetrisWidth = 10, TetrisHeight = 22 };
-typedef enum { PieceL, PieceJ, PieceI, PieceO, PieceT, PieceS, PieceZ } PieceType;
+#include "wm_message_to_string.h"
 
 typedef struct
 {
-	PieceType type;
-	int rotation;
-	int x, y;
-} TetrisPiece;
+	PAINTSTRUCT ps;
+	HDC screen_device_context;
+	HDC hdc;
+	HBITMAP bitmap;
+	HGDIOBJ previous_gdi_object;
+	int screen_width;
+	int screen_height;
+} Drawer;
+
+void rect(Drawer drawer, int x, int y, int w, int h, int r, int g, int b)
+{
+	RECT rect = {x, y, x+w, y+h};
+	HBRUSH brush = CreateSolidBrush(RGB(r,g,b));
+	int success = FillRect(drawer.hdc, &rect, brush);
+	if (success < 0)
+		fprintf(stderr, "Failed to draw a rectangle. (%d, %d, %d, %d)", x,y, w,h);
+	DeleteObject(brush);
+}
+
+void text(Drawer drawer, int x, int y, char* str, int strLen)
+{
+	RECT rect = {x, y, x, y};
+	DrawTextExA(drawer.hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
+}
 
 typedef signed long long i64;
-typedef struct
+i64 microseconds()
 {
-	int magic_number;
-	TetrisPiece current_piece;
-	unsigned char board[TetrisWidth * TetrisHeight];
-	int lines_cleared;
-	int score;
-	i64 current_time_us;
-	i64 fall_timer;
-	int game_over;
-	int input_left;
-	int input_right;
-	int input_down;
-	int input_rotate;
-	int input_drop;
-} Tetris;
+	clock_t c = clock();
+	return ((i64)c) * (1000000ull / CLOCKS_PER_SEC);
+}
+
+#include "tetris.h"
 
 typedef struct
 {
@@ -619,18 +623,8 @@ typedef struct
 
 	Tetris tetris;
 } State;
-enum { StateInitializedMagicNumber = 123456 };
 
-typedef struct
-{
-	PAINTSTRUCT ps;
-	HDC screen_device_context;
-	HDC hdc;
-	HBITMAP bitmap;
-	HGDIOBJ previous_gdi_object;
-	int screen_width;
-	int screen_height;
-} Drawer;
+enum { StateInitializedMagicNumber = 123456 };
 
 Drawer make_drawer(HWND hWnd)
 {
@@ -666,16 +660,6 @@ void pixel(Drawer drawer, int x, int y, int r, int g, int b)
 	//	fprintf(stderr, "Failed to set pixel to color. (%d, %d) -> (%d,%d,%d)", x,y, r,g,b);
 }
 
-void rect(Drawer drawer, int x, int y, int w, int h, int r, int g, int b)
-{
-	RECT rect = {x, y, x+w, y+h};
-	HBRUSH brush = CreateSolidBrush(RGB(r,g,b));
-	int success = FillRect(drawer.hdc, &rect, brush);
-	if (success < 0)
-		fprintf(stderr, "Failed to draw a rectangle. (%d, %d, %d, %d)", x,y, w,h);
-	DeleteObject(brush);
-}
-
 void fill(Drawer drawer, int r, int g, int b)
 {
 	int w = GetDeviceCaps(drawer.hdc, HORZRES);
@@ -683,25 +667,11 @@ void fill(Drawer drawer, int r, int g, int b)
 	rect(drawer, 0,0, w,h, r,g,b);
 }
 
-void text(Drawer drawer, int x, int y, char* str, int strLen)
-{
-	RECT rect = {x, y, x, y};
-	DrawTextExA(drawer.hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
-}
-
 void text_w(Drawer drawer, int x, int y, wchar_t* str, int strLen)
 {
 	RECT rect = {x, y, x, y};
 	DrawTextExW(drawer.hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
 }
-
-i64 microseconds()
-{
-	clock_t c = clock();
-	return ((i64)c) * (1000000ull / CLOCKS_PER_SEC);
-}
-
-void tetris_draw(Drawer drawer, Tetris* tetris);
 
 void paint(HWND hWnd, State* state)
 {
@@ -728,6 +698,8 @@ void paint(HWND hWnd, State* state)
 
 int window_message_handler_impl(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+	trace_printf("\n\twindow_message_handler_impl(%s, %lld, %lld) ", wm_get_string(message), (long long)wParam, (long long)lParam);
+
 	switch (message)
 	{
 		case WM_CREATE:
@@ -841,307 +813,26 @@ void create_window(State* state)
 
 int poll_messages(State* state)
 {
+	trace_printf("poll_messages { %d ", state->tick);
+
 	if (!state->hWnd)
 		return 0;
+
+	int message_received = 0;
 
 	MSG msg;
 	while (PeekMessage(&msg, state->hWnd, 0, 0, PM_REMOVE))
 	{
+		message_received = 1;
 		TranslateMessage(&msg);
 		DispatchMessage(&msg);
 	}
+
+	if (message_received)
+		trace_printf("\n}\n");
+	else
+		trace_printf("} ");
 	return 0;
-}
-
-void get_block_offsets(PieceType piece_type, int rotation, int* out_offsets_x, int* out_offsets_y)
-{
-	//                     PieceL,  PieceJ,  PieceI, PieceO, PieceT,  PieceS,  PieceZ
-	int offsets_x[7*3] = {-1,-1,1,  1,-1,1, -1,1,2,  1,0,1,  1,-1,0,  1,0,-1, -1,0,1};
-	int offsets_y[7*3] = { 1, 0,0,  1, 0,0,  0,0,0,  0,1,1,  0, 0,1,  0,1, 1,  0,1,1};
-
-	//                       L, J, I, O, T, S, Z
-	int rotation_counts[] = {4, 4, 2, 1, 4, 2, 2};
-
-	out_offsets_x[0] = out_offsets_y[0] = 0;
-	for (int i = 1; i < 4; ++i)
-	{
-		out_offsets_x[i] = offsets_x[piece_type * 3 + i-1];
-		out_offsets_y[i] = offsets_y[piece_type * 3 + i-1];
-	}
-
-	rotation = rotation % rotation_counts[piece_type];
-	for (int r = 0; r < rotation; ++r)
-	{
-		for (int i = 1; i < 4; ++i)
-		{
-			int temp = out_offsets_x[i];
-			out_offsets_x[i] = -out_offsets_y[i];
-			out_offsets_y[i] = temp;
-		}
-	}
-}
-
-void get_piece_blocks(TetrisPiece piece, int* out_piece_x, int* out_piece_y)
-{
-	int piece_offsets_x[4] = {0};
-	int piece_offsets_y[4] = {0};
-	get_block_offsets(piece.type, piece.rotation, piece_offsets_x, piece_offsets_y);
-
-	for (int i = 0; i < 4; ++i)
-	{
-		out_piece_x[i] = piece.x + piece_offsets_x[i];
-		out_piece_y[i] = piece.y + piece_offsets_y[i];
-	}
-}
-
-void get_tetris_color(int tile_color, int* r, int* g, int* b)
-{
-	int x = 170, y = 70, z = 110;
-	switch(tile_color)
-	{
-	case 0: *r = *g = *b = 0; return;
-	case 1: *r = x; *g = *b = y; return;
-	case 2: *g = x; *r = *b = y; return;
-	case 3: *b = x; *r = *g = y; return;
-	case 4: *r = *b = x; *g = y; return;
-	case 5: *g = *r = x; *b = y; return;
-	case 6: *b = *g = x; *r = y; return;
-	case 7: *b = *r = *g = z; return;
-	}
-}
-
-int move_piece_to(TetrisPiece* piece, Tetris* tetris, int x, int y, int r)
-{
-	int offsets_x[4];
-	int offsets_y[4];
-	get_block_offsets(piece->type, piece->rotation + r, offsets_x, offsets_y);
-
-	for (int i = 0; i < 4; ++i)
-	{
-		int xx = piece->x + x + offsets_x[i];
-		int yy = piece->y + y + offsets_y[i];
-		if (xx < 0 || xx >= TetrisWidth)
-			return 0;
-		if (yy >= TetrisHeight)
-			return 0;
-		if (yy < 0)
-			continue;
-
-		if (tetris->board[xx + yy * TetrisWidth])
-			return 0;
-	}
-
-	piece->rotation += r;
-	piece->x += x;
-	piece->y += y;
-	return 1;
-}
-
-int move_to(Tetris* tetris, int x, int y, int r)
-{
-	return move_piece_to(&tetris->current_piece, tetris, x, y, r);
-}
-
-void tetris_draw(Drawer drawer, Tetris* tetris)
-{
-	RECT screen_rect;
-	GetClientRect(WindowFromDC(drawer.screen_device_context), &screen_rect);
-	int screen_height = screen_rect.bottom - screen_rect.top;
-	int h = (screen_height - 20) / TetrisHeight;
-	int w = h;
-	int margin = w/2;
-	rect(drawer, 0, 0, w * TetrisWidth + margin*2, w * TetrisHeight + margin*2, 70,10,50);
-
-	TetrisPiece shadow_piece = tetris->current_piece;
-	while (move_piece_to(&shadow_piece, tetris, 0, 1, 0)) {}
-
-	int piece_x[4] = {0};
-	int piece_y[4] = {0};
-	get_block_offsets(tetris->current_piece.type, tetris->current_piece.rotation, piece_x, piece_y);
-	for (int i = 0; i < 4; ++i)
-	{
-		piece_x[i] += tetris->current_piece.x;
-		piece_y[i] += tetris->current_piece.y;
-	}
-
-	for (int y = 0; y < TetrisHeight; ++y)
-	{
-		for (int x = 0; x < TetrisWidth; ++x)
-		{
-			int tile_color = tetris->board[y * TetrisWidth + x];
-			int piece_hit = 0;
-			int shadow_hit = 0;
-			int shadow_piece_hit = 0;
-
-			for (int i = 0; i < 4; ++i)
-			{
-				if (piece_x[i] != x || piece_y[i] > y)
-					continue;
-
-				int shadow_y = piece_y[i] - tetris->current_piece.y + shadow_piece.y;
-				if (piece_y[i] == y)
-					piece_hit = 1;
-				else if (shadow_y == y)
-					shadow_piece_hit = 1;
-				else if (shadow_y > y)
-					shadow_hit = 1;
-				else
-					continue;
-
-				tile_color = tetris->current_piece.type + 1;
-			}
-
-			int r,g,b;
-			get_tetris_color(tile_color, &r,&g,&b);
-			int divider = 1;
-			if (piece_hit)
-				divider = 1;
-			else if (shadow_piece_hit)
-				divider = 2;
-			else if (shadow_hit)
-				divider = 3;
-
-			r/=divider; g/=divider; b/=divider;
-
-			rect(drawer, x * w + margin, y * h + margin, w, h, r,g,b);
-		}
-	}
-
-	char score_buffer[32];
-	sprintf(score_buffer, "%d", tetris->score);
-	text(drawer, drawer.screen_width / 2, 30, score_buffer, -1);
-
-	if (tetris->game_over)
-		text(drawer, drawer.screen_width / 2, 60, "Game Over!", -1);
-}
-
-int tetris_update(Tetris* tetris)
-{
-	if (tetris->magic_number != StateInitializedMagicNumber
-		|| (tetris->game_over && tetris->input_drop))
-	{
-		memset(tetris, 0, sizeof *tetris);
-		tetris->magic_number = StateInitializedMagicNumber;
-		tetris->current_time_us =  microseconds();
-		tetris->fall_timer = 1000 * 1000; // 1 second
-		tetris->current_piece.x = 5;
-		return 1;
-	}
-
-	if (tetris->game_over)
-		return 0;
-
-	{
-		i64 t = microseconds();
-		tetris->fall_timer -= t - tetris->current_time_us;
-		//printf("fall: %lld, t: %lld, ct: %lld, -:%lld\n", tetris->fall_timer, t, tetris->current_time_us, t - tetris->current_time_us);
-		tetris->current_time_us = t;
-	}
-
-	int move_left = tetris->input_left;
-	int move_right = tetris->input_right;
-	int move_down = tetris->input_down;
-	int rotate = tetris->input_rotate;
-	int drop = tetris->input_drop;
-	tetris->input_left = tetris->input_right = tetris->input_down = tetris->input_rotate = tetris->input_drop = 0;
-
-	int difficulty = 1 + tetris->lines_cleared / 10;
-	i64 drop_delay = 1000 * 1000 / difficulty;
-	if (drop)
-	{
-		tetris->fall_timer = drop_delay;
-	}
-	else if (move_down)
-	{
-		tetris->fall_timer = drop_delay;
-		tetris->score += 1;
-	}
-	else if (tetris->fall_timer <= 0)
-	{
-		move_down = 1;
-		tetris->fall_timer += drop_delay;
-		if (tetris->fall_timer < 0)
-			tetris->fall_timer = drop_delay; // No double drops if the game was paused etc.
-	}
-
-	if (rotate)
-	{
-		int i_piece_nudge = tetris->current_piece.type == PieceI && tetris->current_piece.x >= 8;
-
-		move_to(tetris, 0,0,1)
-		|| move_to(tetris,  1,0,1)
-		|| move_to(tetris, -1,0,1)
-		|| (i_piece_nudge && move_to(tetris, -2,0,1))
-		|| move_to(tetris, 0,1,1);
-	}
-
-	if (move_left)
-		move_to(tetris, -1,0,0);
-
-	if (move_right)
-		move_to(tetris, 1,0,0);
-
-	if (drop)
-	{
-		while (move_to(tetris, 0,1,0))
-			tetris->score += 1;
-		move_down = 1;
-	}
-
-	if (move_down)
-	{
-		if (!move_to(tetris, 0,1,0))
-		{
-			int offsets_x[4];
-			int offsets_y[4];
-			get_block_offsets(tetris->current_piece.type, tetris->current_piece.rotation, offsets_x, offsets_y);
-
-			// stick
-			for (int i = 0; i < 4; ++i)
-			{
-				int x = tetris->current_piece.x + offsets_x[i];
-				int y = tetris->current_piece.y + offsets_y[i];
-				tetris->board[x + y * TetrisWidth] = tetris->current_piece.type + 1;
-			}
-
-			// destroy
-			int clears = 0;
-			for (int y = TetrisHeight; y-- > 0;)
-			{
-				int block_count = 0;
-				for (int x = 0; x < TetrisWidth; ++x)
-				{
-					int val = tetris->board[x + y * TetrisWidth];
-					if (val)
-						block_count += 1;
-
-					tetris->board[x + y * TetrisWidth] = 0;
-					tetris->board[x + (y + clears) * TetrisWidth] = val;
-				}
-
-				if (block_count == 10)
-					clears += 1;
-			}
-
-			// meta
-			tetris->lines_cleared += clears;
-			tetris->score += clears * clears * 100 * difficulty;
-
-			// new piece
-			tetris->current_piece.type = (tetris->current_piece.type + 1) % 7;
-			tetris->current_piece.x = 5;
-			tetris->current_piece.y = 0;
-			tetris->current_piece.rotation = 0;
-
-			if (!move_to(tetris, 0,0,0))
-			{
-				tetris->game_over = 1;
-				printf("Game Over! Final Score: %d\n", tetris->score);
-			}
-		}
-	}
-
-	return move_down || move_left || move_right || move_down || rotate || drop;
 }
 
 static void setup(State* state)
