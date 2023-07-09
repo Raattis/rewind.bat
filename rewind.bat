@@ -109,7 +109,7 @@ int main()
 
 enum { TRACE=1 };
 #define trace_printf(...) do { if (TRACE) printf(__VA_ARGS__); } while(0)
-#define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); void exit(int); exit(1); } while(0)
+#define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); void system(char*); system("pause"); void exit(int); exit(1); } while(0)
 
 typedef struct
 {
@@ -422,28 +422,34 @@ void run_recompilation_loop()
 			s = tcc_new();
 			FATAL(s, "Could not create tcc state\n");
 
-			printf("tcc_set_output_type  \n");
+			trace_printf("tcc_set_output_type  \n");
 			tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
 
+			trace_printf("tcc_set_options  \n");
 			//tcc_set_options(s, "-vv -nostdlib -nostdinc");
 			tcc_set_options(s, "-nostdlib -nostdinc");
 
+			trace_printf("tcc_add_include_path  \n");
 			tcc_add_include_path(s, "include");
 			tcc_add_include_path(s, "include/winapi");
 
+			trace_printf("tcc_add_library_path  \n");
 			tcc_add_library_path(s, "lib");
 
+			trace_printf("tcc_add_library_err  \n");
 			extern int tcc_add_library_err(TCCState *s, const char *f);
 			tcc_add_library_err(s, "gdi32");
 			tcc_add_library_err(s, "msvcrt");
 			tcc_add_library_err(s, "kernel32");
 			tcc_add_library_err(s, "user32");
 
+			trace_printf("tcc_set_options \n");
 			tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX");
 
+			trace_printf("tcc_add_symbol \n");
 			tcc_add_symbol(s, "get_window_message_handler", get_window_message_handler);
 
-			printf("Compiling\n");
+			trace_printf("Compiling\n");
 			if (-1 == tcc_compile_string(s, source_buffer))
 			{
 				trace_printf("Failed to recompile '%s'.\n", b_source_filename);
@@ -470,6 +476,7 @@ void run_recompilation_loop()
 						continue;
 					}
 
+					extern void free(void*);
 					free(compilation_result_buffer);
 					compilation_result_buffer_size = size;
 					compilation_result_buffer = malloc(compilation_result_buffer_size);
