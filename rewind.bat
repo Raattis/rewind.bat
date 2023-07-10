@@ -84,8 +84,17 @@ if not exist %compiler_executable% (
 	echo #line 0 "%~n0%~x0"
 	echo #if GOTO_BOOTSTRAP_BUILDER
 	type %~n0%~x0
-) | %compiler_executable% -run -nostdlib -lmsvcrt -lkernel32 -luser32 -nostdinc -Itcc/include -Itcc/include/winapi -bench -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE - %~n0%~x0
-@exit ERRORLEVEL
+) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
+@rem ) | %compiler_executable% -o %~n0.exe  -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
+
+if %errorlevel% == 0 (
+	echo Run finished without errors!
+) else (
+	echo Run finished with return value %errorlevel%
+)
+
+exit errorlevel
+
 */
 #endif // BOOTSTRAP_BUILDER
 
@@ -109,13 +118,14 @@ int main()
 
 enum { TRACE=1 };
 #define trace_printf(...) do { if (TRACE) printf(__VA_ARGS__); } while(0)
-#define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); void system(char*); system("pause"); void exit(int); exit(1); } while(0)
+#define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); int system(const char*); system("pause"); void exit(int); exit(1); } while(0)
 
 typedef struct
 {
 	int stop;
 	int request_recompile;
 	int was_recompiled;
+	int replay;
 	unsigned long long buffer_size;
 	char* buffer;
 } Communication;
@@ -128,6 +138,7 @@ typedef struct
 #define SEGMENT_NAME "SOURCE"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <windows.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -324,15 +335,25 @@ int get_any_newer_file_timestamp(file_timestamp* stamp, struct headers_and_sourc
 	return found;
 }
 
-
+typedef void (*Update_Func)(Communication* communication);
 typedef LRESULT (*Window_Message_Handler_Func)(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-Window_Message_Handler_Func window_message_handler_impl = 0;
+struct Tick_Data
+{
+	int state_offset;
+	int source_offset;
+	int update_func_offset;
+	int message_handler_func_offset;
+};
+
+static const struct Tick_Data* g_tick_data = 0;
+static void* g_program_buffer = 0;
 
 // Have this up here to prevent moving the function address due to resizing other functions when recompiling.
 LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-	if (window_message_handler_impl)
-		return window_message_handler_impl(hWnd, message, wParam, lParam);
+	Window_Message_Handler_Func handler = g_tick_data ? g_program_buffer + g_tick_data->message_handler_func_offset : 0;
+	if (handler)
+		return handler(hWnd, message, wParam, lParam);
 	else
 		return DefWindowProc(hWnd, message, wParam, lParam);
 }
@@ -365,18 +386,54 @@ void run_recompilation_loop()
 	file_timestamp newest_file_timestamp;
 	get_file_timestamp(&newest_file_timestamp, b_source_filename);
 
-	void* user_buffer = malloc(1000);
+	int user_buffer_size = 1000;
+	void* user_buffer = malloc(user_buffer_size);
 	int force_recompile = 1;
 
-	typedef void (*UpdateFunc)(Communication* communication);
-	UpdateFunc update = 0;
-
 	TCCState *s = 0;
-	int compilation_result_buffer_size = 16 * 1024 * 1024;
-	void* compilation_result_buffer = malloc(compilation_result_buffer_size);
+
+	int source_buffer_size = 40 * 1024 * 100; // Roughly space for 100 recompiles
+	char* source_buffer = malloc(source_buffer_size);
+	const char* source_buffer_start = source_buffer;
+	const char* source_buffer_end = source_buffer + source_buffer_size;
+
+	int program_buffer_size = 40 * 1024 * 100; // Roughly space for 100 recompiles
+	void* program_buffer = malloc(program_buffer_size);
+	const void* program_buffer_start = program_buffer;
+	const void* program_buffer_end = program_buffer + program_buffer_size;
+	g_program_buffer = program_buffer;
+
+	int state_size = user_buffer_size;
+	int state_max_count = 60; //16 * 1024;
+	void* state_buffer = malloc(state_size * state_max_count);
+	const void* state_buffer_start = state_buffer;
+	const void* state_buffer_end = state_buffer + state_size * state_max_count;
+
+	int tick_data_buffer_count = state_max_count;
+	struct Tick_Data* tick_data_buffer = (struct Tick_Data*)malloc(tick_data_buffer_count * sizeof(struct Tick_Data));
+	const struct Tick_Data* tick_data_buffer_start = tick_data_buffer;
+	const struct Tick_Data* tick_data_buffer_end = tick_data_buffer + tick_data_buffer_count;
+	int tick_count = 0;
 
 	for (;;)
 	{
+		trace_printf("\rTicks left: %lld, %lld, %lld, %lld ", tick_data_buffer - tick_data_buffer_start, state_buffer - state_buffer_start, program_buffer - program_buffer_start, source_buffer - source_buffer_start);
+
+		if (tick_data_buffer >= tick_data_buffer_end)
+		{
+			printf("Out of ticks.");
+			break;
+		}
+
+		struct Tick_Data new_tick;
+
+		if (!g_tick_data)
+			memset(&new_tick, 0, sizeof(struct Tick_Data));
+		else
+			memcpy(&new_tick, g_tick_data, sizeof(struct Tick_Data));
+
+		trace_printf("tick(%d,%d,%d,%d), ", new_tick.state_offset, new_tick.update_func_offset, new_tick.message_handler_func_offset, new_tick.source_offset);
+
 		int was_recompiled = 0;
 
 		if (get_any_newer_file_timestamp(&newest_file_timestamp, headers_and_sources))
@@ -388,11 +445,6 @@ void run_recompilation_loop()
 
 			printf("Recompiling '%s'\n", b_source_filename);
 
-			static char* source_buffer = 0;
-			const int MAX_SOURCE_SIZE = 1024 * 1024 * 16; // 4 MB
-			if (source_buffer == 0)
-				source_buffer = malloc(MAX_SOURCE_SIZE);
-
 			printf("Writing prefix\n");
 			int prefix_length = sprintf(source_buffer,
 				"\n" "#line 0 \"%s\""
@@ -400,21 +452,29 @@ void run_recompilation_loop()
 				"\n"
 				, b_source_filename);
 
+			char* src_end = 0;
 			printf("Copying source\n");
 			{
 				char* src = source_buffer + prefix_length;
-				int size_left = MAX_SOURCE_SIZE - prefix_length;
+				int size_left = source_buffer_end - src;
 
 				FILE* src_file = fopen(b_source_filename, "r");
+				if (!src_file)
+				{
+					fprintf(stderr, "Source file '%s' doesn't exist.", b_source_filename);
+					wait_for_change(&newest_file_timestamp, headers_and_sources);
+					continue;
+				}
 				size_t read_length = fread(src, sizeof(char), size_left, src_file);
 				fclose(src_file);
 
 				FATAL(read_length + 1 < size_left, "%s is too big (%d B < %d B) to runtime compile.", b_source_filename, read_length, size_left);
 
 				src[read_length] = 0;
+				src_end = src + read_length + 1;
 			}
 
-			window_message_handler_impl = 0;
+			new_tick.message_handler_func_offset = -1;
 
 			if (s)
 				tcc_delete(s);
@@ -425,16 +485,16 @@ void run_recompilation_loop()
 			trace_printf("tcc_set_output_type  \n");
 			tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
 
-			trace_printf("tcc_set_options  \n");
-			//tcc_set_options(s, "-vv -nostdlib -nostdinc");
-			tcc_set_options(s, "-nostdlib -nostdinc");
+			trace_printf("tcc_set_options \n");
+			//tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX -nostdlib -nostdinc -vv");
+			tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX -nostdlib -nostdinc");
 
 			trace_printf("tcc_add_include_path  \n");
-			tcc_add_include_path(s, "include");
-			tcc_add_include_path(s, "include/winapi");
+			tcc_add_include_path(s, "tcc/include");
+			tcc_add_include_path(s, "tcc/include/winapi");
 
 			trace_printf("tcc_add_library_path  \n");
-			tcc_add_library_path(s, "lib");
+			tcc_add_library_path(s, "tcc/lib");
 
 			trace_printf("tcc_add_library_err  \n");
 			extern int tcc_add_library_err(TCCState *s, const char *f);
@@ -443,49 +503,43 @@ void run_recompilation_loop()
 			tcc_add_library_err(s, "kernel32");
 			tcc_add_library_err(s, "user32");
 
-			trace_printf("tcc_set_options \n");
-			tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX");
-
 			trace_printf("tcc_add_symbol \n");
 			tcc_add_symbol(s, "get_window_message_handler", get_window_message_handler);
 
 			trace_printf("Compiling\n");
 			if (-1 == tcc_compile_string(s, source_buffer))
 			{
-				trace_printf("Failed to recompile '%s'.\n", b_source_filename);
+				fprintf(stderr, "Failed to recompile '%s'.\n", b_source_filename);
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
 			trace_printf("Checking resulting size...\n");
-			int size = tcc_relocate(s, 0);
-			if (size < 0)
+			int program_size = tcc_relocate(s, 0);
+			if (program_size < 0)
 			{
-				fprintf(stderr, "Failed get size for relocate (=linking). Err: %d\n", size);
+				fprintf(stderr, "Failed get size for relocate (=linking). Err: %d\n", program_size);
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 			else
 			{
-				if (size > compilation_result_buffer_size)
+				if (program_size > program_buffer_end - program_buffer)
 				{
-					if (size > 1024 * 1024 * 1024)
+					if (program_size > 1024 * 1024 * 1024)
 					{
-						fprintf(stderr, "Sanity check failed: Compilation result is %d bytes which is more than 1 GB.\n", size);
+						fprintf(stderr, "Sanity check failed: Compilation result is %d bytes which is more than 1 GB.\n", program_size);
 						wait_for_change(&newest_file_timestamp, headers_and_sources);
 						continue;
 					}
 
-					extern void free(void*);
-					free(compilation_result_buffer);
-					compilation_result_buffer_size = size;
-					compilation_result_buffer = malloc(compilation_result_buffer_size);
+					FATAL(0, "Out of recompilation buffer space");
 				}
 			}
 
 #ifdef _WIN32
 			DWORD old;
-			if (!VirtualProtect(compilation_result_buffer, compilation_result_buffer_size, PAGE_READWRITE, &old))
+			if (!VirtualProtect(program_buffer, program_size, PAGE_READWRITE, &old))
 			{
 				fprintf(stderr, "Couldn't unlock page protection. Old protection value: %d", old);
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
@@ -497,7 +551,7 @@ void run_recompilation_loop()
 
 			printf("Linking...\n");
 			int err = 0;
-			if (0 > (err = tcc_relocate(s, compilation_result_buffer)))
+			if (0 > (err = tcc_relocate(s, program_buffer)))
 			{
 				fprintf(stderr, "Failed to relocate (=link). Err: %d\n", err);
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
@@ -505,9 +559,9 @@ void run_recompilation_loop()
 			}
 
 			clock_t milliseconds = (clock() - c) * (1000ull / CLOCKS_PER_SEC);
-			printf("Recompilation took %lld.%03lld seconds. Executable size in memory is %lld.%03lld KB\n", milliseconds/1000ull, milliseconds%1000ull, size / 1000ull, size % 1000ull);
+			printf("Recompilation took %lld.%03lld seconds. Executable size in memory is %lld.%03lld KB\n", milliseconds/1000ull, milliseconds%1000ull, program_size / 1000ull, program_size % 1000ull);
 
-			update = tcc_get_symbol(s, "update");
+			Update_Func update = tcc_get_symbol(s, "update");
 			if (!update)
 			{
 				fprintf(stderr, "Failed to load the 'void update(Communication*)' symbol after recompilation.\n");
@@ -515,23 +569,37 @@ void run_recompilation_loop()
 				continue;
 			}
 
-			window_message_handler_impl = tcc_get_symbol(s, "window_message_handler_impl");
-			if (!window_message_handler_impl)
+			Window_Message_Handler_Func message_handler_func = tcc_get_symbol(s, "window_message_handler_impl");
+			if (!message_handler_func)
 			{
 				fprintf(stderr, "Failed to load the 'window_message_handler_impl' symbol after recompilation.\n");
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
+			new_tick.source_offset = src_end - source_buffer;
+			source_buffer = src_end;
+
+			new_tick.update_func_offset = ((char*)update) - program_buffer_start;
+			new_tick.message_handler_func_offset = ((char*)message_handler_func) - program_buffer_start;
+
+			program_buffer += program_size;
 			get_headers_and_sources(b_source_filename, headers_and_sources);
+
+			memcpy(tick_data_buffer, &new_tick, sizeof(struct Tick_Data));
+			g_tick_data = tick_data_buffer;
+			tick_data_buffer += 1;
 
 			force_recompile = 0;
 			was_recompiled = 1;
+
+			continue;
 		}
 
-		if (!update)
+		Update_Func update = (Update_Func)(program_buffer_start + new_tick.update_func_offset);
+		if (new_tick.update_func_offset <= 0)
 		{
-			fprintf(stderr, "'update' not loaded. Last error: 0x%X\n.", GetLastError());
+			FATAL(0, "'update' not loaded.");
 			force_recompile = 1;
 			Sleep(500);
 			continue;
@@ -541,6 +609,7 @@ void run_recompilation_loop()
 		communication.was_recompiled = was_recompiled;
 		communication.buffer = user_buffer;
 		communication.buffer_size = 1000;
+
 		update(&communication);
 		if (communication.stop != 0)
 			break;
@@ -548,10 +617,40 @@ void run_recompilation_loop()
 		if (communication.request_recompile != 0)
 			force_recompile = 1;
 
+		new_tick.state_offset = state_buffer - state_buffer_start;
+		memcpy(state_buffer, user_buffer, sizeof(user_buffer_size));
+		state_buffer += state_size;
+
+		memcpy(tick_data_buffer, &new_tick, sizeof(struct Tick_Data));
+		g_tick_data = tick_data_buffer;
+		tick_data_buffer += 1;
 		continue;
 	}
 
-	tcc_delete(s);
+	if (s)
+		tcc_delete(s);
+
+	for(const struct Tick_Data* tick = tick_data_buffer_start; tick < tick_data_buffer_end; tick++)
+	{
+		trace_printf("\rTicks left: %lld, ", tick - tick_data_buffer_start);
+		trace_printf("tick(%d,%d,%d,%d), ", tick->state_offset, tick->update_func_offset, tick->message_handler_func_offset, tick->source_offset);
+
+		g_tick_data = tick;
+
+		Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
+
+		Communication communication = {0};
+		communication.was_recompiled = 0;
+		communication.buffer = state_buffer_start + tick->state_offset;
+		communication.buffer_size = 1000;
+		communication.replay = 1;
+
+		update(&communication);
+
+		if (communication.stop != 0)
+			break;
+	}
+
 	return;
 }
 
@@ -682,6 +781,8 @@ void text_w(Drawer drawer, int x, int y, wchar_t* str, int strLen)
 
 void paint(HWND hWnd, State* state)
 {
+	trace_printf("paint ");
+
 	Drawer drawer = make_drawer(hWnd);
 
 	fill(drawer, 255, 255, 255);
@@ -794,7 +895,10 @@ extern Window_Message_Handler_Func get_window_message_handler();
 
 void create_window(State* state)
 {
+	trace_printf("create_window\n");
+
 	Window_Message_Handler_Func window_message_handler = get_window_message_handler();
+	FATAL(window_message_handler, "get_window_message_handler() returned nothing.");
 	state->old_window_proc = (unsigned long long)window_message_handler;
 
 	WNDCLASSEX wcex;
@@ -852,8 +956,10 @@ static void setup(State* state)
 		return;
 	}
 
-	printf("Init state.\n");
+	trace_printf("Clearing state...\n");
 	memset(state, 0, sizeof(*state));
+
+	trace_printf("Initializing state...\n");
 	state->initialized = StateInitializedMagicNumber;
 	state->tick = 0;
 	state->x = 200;
@@ -881,15 +987,18 @@ void update(Communication* communication)
 	i64 t = microseconds();
 
 	State* state = (State*)communication->buffer;
-	setup(state);
+
+	if (!communication->replay)
+		setup(state);
 
 	state->tick += 1;
 	if (state->tick % 100 == 0)
 		printf("update(%5d)\n", state->tick);
 
-	tick(state);
+	if (!communication->replay)
+		tick(state);
 
-	if (state->hWnd && (communication->was_recompiled || state->redraw_requested))
+	if (state->hWnd && (communication->was_recompiled || state->redraw_requested || communication->replay))
 	{
 		state->redraw_requested = 0;
 		RedrawWindow(state->hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
