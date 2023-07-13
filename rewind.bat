@@ -123,11 +123,13 @@ enum { TRACE=1 };
 typedef struct
 {
 	int stop;
-	int was_recompiled;
+	int skip;
 	int redraw_requested;
-	int replay;
-	unsigned long long buffer_size;
-	char* buffer;
+	signed long long time_us;
+	unsigned long long input_buffer_size;
+	char* input_buffer;
+	unsigned long long user_buffer_size;
+	char* user_buffer;
 } Communication;
 
 #endif // SHARED_PREFIX
@@ -152,6 +154,11 @@ enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=0&&TRACE };
 #define input_printf(...) do { if (TRACE_INPUT) printf(__VA_ARGS__); } while(0)
 #define tick_printf(...) do { if (TRACE_TICKS) printf(__VA_ARGS__); } while(0)
 
+signed long long microseconds(void)
+{
+	clock_t c = clock();
+	return ((signed long long)c) * (1000000ull / CLOCKS_PER_SEC);
+}
 
 typedef struct stat file_timestamp;
 
@@ -385,6 +392,9 @@ typedef void (*Paint_Func)(Communication* communication, Drawer* drawer);
 typedef LRESULT (*Window_Message_Handler_Func)(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 struct Tick_Data
 {
+	int skip;
+
+	int time_us;
 	int state_offset;
 	int source_offset;
 	int key_down_func_offset;
@@ -396,10 +406,10 @@ struct Tick_Data
 };
 
 static const struct Tick_Data* g_tick_data = 0;
-static void* g_state_buffer_start = 0;
 static const void* g_program_buffer_start = 0;
 static int g_window_close_requested = 0;
 static int g_stopping = 0;
+static void* g_input_buffer = 0;
 static void* g_user_buffer = 0;
 
 LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -430,16 +440,12 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 			break;
 		case WM_PAINT:
 		{
-			//printf("WM_PAINT\n");
-			
 			Communication communication = {0};
-			//communication.buffer = GetWindowLongPtr(hWnd, GWLP_USERDATA);
-			if (g_tick_data)
-				communication.buffer = g_state_buffer_start + g_tick_data->state_offset;
+			communication.user_buffer = g_user_buffer;
 
 			Drawer drawer;
 			open_drawer(hWnd, &drawer);
-			
+
 			Paint_Func paint = (Paint_Func)(g_program_buffer_start + g_tick_data->paint_func_offset);
 			paint(&communication, &drawer);
 
@@ -456,10 +462,14 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 				return 0;
 			}
 
-			if (g_user_buffer)
+			if (!g_input_buffer)
+			{
+				fprintf(stderr, "Trying to handle input with user buffer not defined.");
+			}
+			else
 			{
 				Communication communication = {0};
-				communication.buffer = g_user_buffer;
+				communication.input_buffer = g_input_buffer;
 
 				Key_Down_Func key_down = (Key_Down_Func)(g_program_buffer_start + g_tick_data->key_down_func_offset);
 				if (!key_down(&communication, wParam))
@@ -512,19 +522,31 @@ HWND create_window(void)
 	return hWnd;
 }
 
-void poll_messages(HWND hWnd, void* user_buffer)
+void poll_repaint(HWND hWnd, void* user_buffer)
 {
-	input_printf("poll_messages { ");
+	input_printf("poll_repaint { ");
 
 	if (!hWnd)
 		return;
 
-	int message_received = 0;
-
 	g_user_buffer = user_buffer;
 
+	int message_received = 0;
+
 	MSG msg;
-	while (PeekMessage(&msg, hWnd, 0, 0, PM_REMOVE))
+	while (PeekMessage(&msg, hWnd, 0, WM_KEYFIRST-1, PM_REMOVE))
+	{
+		message_received = 1;
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	if (message_received)
+		input_printf("\nafter\n");
+	else
+		input_printf("after ");
+
+	while (PeekMessage(&msg, hWnd, WM_KEYLAST-1, ~0u, PM_REMOVE))
 	{
 		message_received = 1;
 		TranslateMessage(&msg);
@@ -532,6 +554,35 @@ void poll_messages(HWND hWnd, void* user_buffer)
 	}
 
 	g_user_buffer = 0;
+
+	if (message_received)
+		input_printf("\n}\n");
+	else
+		input_printf("} ");
+
+	return;
+}
+
+void poll_input(HWND hWnd, void* input_buffer)
+{
+	input_printf("\rpoll_input { ");
+
+	if (!hWnd)
+		return;
+
+	int message_received = 0;
+
+	g_input_buffer = input_buffer;
+
+	MSG msg;
+	while (PeekMessage(&msg, hWnd, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE))
+	{
+		message_received = 1;
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	g_input_buffer = 0;
 
 	if (message_received)
 		input_printf("\n}\n");
@@ -615,6 +666,8 @@ void run_recompilation_loop()
 
 	int user_buffer_size = 1000;
 	void* user_buffer = malloc(user_buffer_size);
+	int input_buffer_size = 100;
+	void* input_buffer = malloc(input_buffer_size);
 	int force_recompile = 1;
 
 	TCCState *s = 0;
@@ -630,12 +683,11 @@ void run_recompilation_loop()
 	const void* program_buffer_end = program_buffer + program_buffer_size;
 	g_program_buffer_start = program_buffer;
 
-	int state_size = user_buffer_size;
+	int state_size = input_buffer_size;
 	int state_max_count = 16 * 1024;
 	void* state_buffer = malloc(state_size * state_max_count);
 	const void* state_buffer_start = state_buffer;
 	const void* state_buffer_end = state_buffer + state_size * state_max_count;
-	g_state_buffer_start = state_buffer;
 
 	int tick_data_buffer_count = state_max_count;
 	struct Tick_Data* tick_data_buffer = (struct Tick_Data*)malloc(tick_data_buffer_count * sizeof(struct Tick_Data));
@@ -828,6 +880,7 @@ void run_recompilation_loop()
 			new_tick.update_func_offset = ((char*)update) - program_buffer_start;
 			new_tick.paint_func_offset = ((char*)paint) - program_buffer_start;
 			new_tick.key_down_func_offset = ((char*)key_down) - program_buffer_start;
+			new_tick.skip = 1;
 
 			program_buffer += program_size;
 			get_headers_and_sources(b_source_filename, headers_and_sources);
@@ -842,36 +895,42 @@ void run_recompilation_loop()
 			continue;
 		}
 
-		FATAL(new_tick.update_func_offset > 0, "'update' not loaded.");
-		Update_Func update = (Update_Func)(program_buffer_start + new_tick.update_func_offset);
+		poll_input(hWnd, input_buffer);
 
 		Communication communication = {0};
-		communication.was_recompiled = was_recompiled;
-		communication.buffer = user_buffer;
-		communication.buffer_size = 1000;
+		communication.time_us = microseconds();
+		communication.input_buffer = input_buffer;
+		communication.input_buffer_size = input_buffer_size;
+		communication.user_buffer = user_buffer;
+		communication.user_buffer_size = user_buffer_size;
 
+		new_tick.time_us = communication.time_us;
+
+		new_tick.state_offset = state_buffer - state_buffer_start;
+		memcpy(state_buffer, input_buffer, input_buffer_size);
+		state_buffer += state_size;
+
+		FATAL(new_tick.update_func_offset > 0, "'update' not loaded.");
+		Update_Func update = (Update_Func)(program_buffer_start + new_tick.update_func_offset);
 		update(&communication);
 
 		if (communication.redraw_requested)
 			RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
 
-		// Paint and input
-		poll_messages(hWnd, user_buffer);
-
 		new_tick.redraw_requested = communication.redraw_requested;
 		new_tick.stop = communication.stop || g_stopping || g_window_close_requested;
-
-		new_tick.state_offset = state_buffer - state_buffer_start;
-		memcpy(state_buffer, user_buffer, user_buffer_size);
-		state_buffer += state_size;
+		new_tick.skip = 0;
 
 		memcpy(tick_data_buffer, &new_tick, sizeof(struct Tick_Data));
 		g_tick_data = tick_data_buffer;
 		tick_data_buffer += 1;
 
+		poll_repaint(hWnd, user_buffer);
+
 		if (new_tick.stop != 0)
 			break;
 
+		Sleep(16);
 		continue;
 	}
 
@@ -881,27 +940,43 @@ void run_recompilation_loop()
 	if (!is_window_open(hWnd))
 		hWnd = create_window();
 
+	memset(user_buffer, 0, user_buffer_size);
+	memset(input_buffer, 0, input_buffer_size);
+
 	for(const struct Tick_Data* tick = tick_data_buffer_start; tick <= tick_data_buffer; tick++)
 	{
 		tick_printf("\rTicks left: %lld, ", tick - tick_data_buffer_start);
 		tick_printf("tick(%d,%d,%d,%d), ", tick->state_offset, tick->update_func_offset, tick->paint_func_offset, tick->key_down_func_offset, tick->source_offset);
 
-		g_tick_data = tick;
+		if (tick->skip)
+			continue;
+
+		memcpy(input_buffer, state_buffer_start + tick->state_offset, input_buffer_size); 
+
+		Communication communication = {0};
+		communication.time_us = tick->time_us;
+		communication.input_buffer = input_buffer;
+		communication.input_buffer_size = input_buffer_size;
+		communication.user_buffer = user_buffer;
+		communication.user_buffer_size = user_buffer_size;
+
+		Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
+		update(&communication);
 
 		if (tick->redraw_requested)
 			RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
 
-		poll_messages(hWnd, 0);
+		g_tick_data = tick;
+		poll_repaint(hWnd, user_buffer);
 
 		if (tick->stop)
 		{
-			DestroyWindow(hWnd);
 			break;
 		}
-
-		if (tick->redraw_requested)
-			Sleep(2);
 	}
+
+	Sleep(1000);
+	DestroyWindow(hWnd);
 
 	return;
 }
@@ -931,14 +1006,12 @@ void _runmain() { _start(); }
 #include <windows.h>
 #include <time.h>
 
-typedef signed long long i64;
-i64 microseconds()
-{
-	clock_t c = clock();
-	return ((i64)c) * (1000000ull / CLOCKS_PER_SEC);
-}
-
 #include "tetris.h"
+
+typedef struct
+{
+	Tetris_Input tetris_input;
+} Input;
 
 typedef struct
 {
@@ -958,12 +1031,12 @@ typedef void Drawer;
 
 void paint(Communication* communication, Drawer* drawer)
 {
-	//trace_printf("paint ");
+	trace_printf("paint ");
 
 	fill(drawer, 255, 255, 255);
 	rect(drawer, 20, 20, 200, 200, 255, 255, 0);
 
-	State* state = (State*)communication->buffer;
+	State* state = (State*)communication->user_buffer;
 	if (state)
 	{
 		for (int x = state->x - 50; x < state->x + 50; ++x)
@@ -981,41 +1054,42 @@ void paint(Communication* communication, Drawer* drawer)
 
 int key_down(Communication* communication, int vk_key_code)
 {
-	State* state = (State*)communication->buffer;
+	Input* input = (Input*)communication->input_buffer;
+	FATAL(input, "No input_buffer given.");
 
-	trace_printf("key_down ");
-	trace_printf("INPUT tetris fall timer: %lld\n", state->tetris.fall_timer);
-	trace_printf("INPUT tetris piece x,y: %d,%d\n", state->tetris.current_piece.x, state->tetris.	current_piece.y);
+	//trace_printf("INPUT tetris fall timer: %lld\n", input->tetris_input.fall_timer);
+	//trace_printf("INPUT tetris piece x,y: %d,%d\n", input->tetris_input.current_piece.x, input->tetris_input.	current_piece.y);
 
 	switch (vk_key_code)
 	{
 		case VK_LEFT:
-			state->tetris.input_left = 1;
+			input->tetris_input.input_left = 1;
 			return 0;
 		case VK_RIGHT:
-			state->tetris.input_right = 1;
+			input->tetris_input.input_right = 1;
 			return 0;
 		case VK_DOWN:
-			state->tetris.input_down = 1;
+			input->tetris_input.input_down = 1;
 			return 0;
 		case VK_UP:
-			state->tetris.input_rotate = 1;
+			input->tetris_input.input_rotate = 1;
 			return 0;
 		case VK_SPACE:
-			state->tetris.input_drop = 1;
+			input->tetris_input.input_drop = 1;
 			return 0;
 	}
 	
 	return 1;
 }
 
-static void setup(State* state)
+static void setup(State* state, Input* input)
 {
 	if (state->initialized == StateInitializedMagicNumber)
 		return;
 
 	trace_printf("Clearing state...\n");
 	memset(state, 0, sizeof(*state));
+	memset(input, 0, sizeof(*input));
 
 	trace_printf("Initializing state...\n");
 	state->initialized = StateInitializedMagicNumber;
@@ -1026,40 +1100,35 @@ static void setup(State* state)
 	printf("\n\nGo to the `tick` function at line %d of this source file and edit the 'state->x' and 'state->y' variables or something and see what happens. :)\n\n", __LINE__ + 3);
 }
 
-static void tick(State* state)
+static void tick(State* state, Input* input, signed long long time_us)
 {
 	// Modify these, save and note the cross in the window being painted to a different spot
 	state->x = 200;
 	state->y = 100;
 
-	if (tetris_update(&state->tetris))
-		state->redraw_requested = 2;
+	if (tetris_update(&state->tetris, &input->tetris_input, time_us))
+		state->redraw_requested = 1;
 }
 
 void update(Communication* communication)
 {
-	FATAL(sizeof(State) <= communication->buffer_size, "State is larger than the buffer. %lld <= %lld", sizeof(State), communication->buffer_size);
+	FATAL(sizeof(State) <= communication->user_buffer_size, "State is larger than the user_buffer. %lld <= %lld", sizeof(State), communication->user_buffer_size);
+	FATAL(sizeof(Input) <= communication->input_buffer_size, "Input is larger than the input_buffer. %lld <= %lld", sizeof(Input), communication->input_buffer_size);
 
-	i64 t = microseconds();
+	State* state = (State*)communication->user_buffer;
+	Input* input = (Input*)communication->input_buffer;
 
-	State* state = (State*)communication->buffer;
-
-	setup(state);
+	setup(state, input);
 
 	state->tick += 1;
-	if (state->tick % 10 == 0)
+	if (state->tick % 100 == 0)
 		printf("update(%5d)\n", state->tick);
 
-	tick(state);
+	tick(state, input, communication->time_us);
 
 	communication->redraw_requested = 0 != state->redraw_requested;
 	if (state->redraw_requested > 0)
 		state->redraw_requested--;
-
-	i64 d = microseconds() - t;
-	trace_printf("%lldms\r", (d/1000) % 1000);
-
-	Sleep(16);
 }
 
 #endif // RUNTIME_LOOP

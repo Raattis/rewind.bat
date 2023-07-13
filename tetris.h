@@ -1,5 +1,19 @@
+
+enum { TRACE_TETRIS=0 };
+
+#define tetris_printf(...) do { if (TRACE_TETRIS) printf(__VA_ARGS__); } while(0)
+
 enum { TetrisWidth = 10, TetrisHeight = 22 };
 typedef enum { PieceL, PieceJ, PieceI, PieceO, PieceT, PieceS, PieceZ } PieceType;
+
+typedef struct
+{
+	int input_left;
+	int input_right;
+	int input_down;
+	int input_rotate;
+	int input_drop;
+} Tetris_Input;
 
 typedef struct
 {
@@ -8,6 +22,7 @@ typedef struct
 	int x, y;
 } TetrisPiece;
 
+typedef signed long long i64;
 typedef struct
 {
 	int magic_number;
@@ -18,11 +33,6 @@ typedef struct
 	i64 current_time_us;
 	i64 fall_timer;
 	int game_over;
-	int input_left;
-	int input_right;
-	int input_down;
-	int input_rotate;
-	int input_drop;
 } Tetris;
 
 void get_block_offsets(PieceType piece_type, int rotation, int* out_offsets_x, int* out_offsets_y)
@@ -117,8 +127,8 @@ int move_to(Tetris* tetris, int x, int y, int r)
 typedef void Drawer;
 void tetris_draw(Drawer* drawer, Tetris* tetris)
 {
-	//trace_printf("DRAW tetris fall timer: %lld\n", tetris->fall_timer);
-	//trace_printf("DRAW tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
+	tetris_printf("DRAW tetris fall timer: %lld\n", tetris->fall_timer);
+	tetris_printf("DRAW tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
 
 	int screen_width, screen_height;
 	get_screen_width_and_height(drawer, &screen_width, &screen_height);
@@ -191,19 +201,19 @@ void tetris_draw(Drawer* drawer, Tetris* tetris)
 		text(drawer, screen_width / 2, 60, "Game Over!", -1);
 }
 
-int tetris_update(Tetris* tetris)
+int tetris_update(Tetris* tetris, Tetris_Input* tetris_input, i64 time_us)
 {
-	//trace_printf("tetris fall timer: %lld\n", tetris->fall_timer);
-	//trace_printf("tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
+	//tetris_printf("tetris fall timer: %lld\n", tetris->fall_timer);
+	//tetris_printf("tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
 
 	enum { TetrisInitializedMagicNumber = 737215 };
 
 	if (tetris->magic_number != TetrisInitializedMagicNumber
-		|| (tetris->game_over && tetris->input_drop))
+		|| (tetris->game_over && tetris_input->input_drop))
 	{
 		memset(tetris, 0, sizeof *tetris);
 		tetris->magic_number = TetrisInitializedMagicNumber;
-		tetris->current_time_us =  microseconds();
+		tetris->current_time_us =  time_us;
 		tetris->fall_timer = 1000 * 1000; // 1 second
 		tetris->current_piece.x = 5;
 		return 1;
@@ -212,19 +222,39 @@ int tetris_update(Tetris* tetris)
 	if (tetris->game_over)
 		return 0;
 
+	tetris_printf("tetris_input_1 %d,%d,%d,%d,%d\n"
+	, tetris_input->input_left
+	, tetris_input->input_right
+	, tetris_input->input_down
+	, tetris_input->input_rotate
+	, tetris_input->input_drop);
+
 	{
-		i64 t = microseconds();
+		i64 t = time_us;
 		tetris->fall_timer -= t - tetris->current_time_us;
-		//printf("fall: %lld, t: %lld, ct: %lld, -:%lld\n", tetris->fall_timer, t, tetris->current_time_us, t - tetris->current_time_us);
+		//tetris_printf("fall: %lld, t: %lld, ct: %lld, -:%lld\n", tetris->fall_timer, t, tetris->current_time_us, t - tetris->current_time_us);
 		tetris->current_time_us = t;
 	}
 
-	int move_left = tetris->input_left;
-	int move_right = tetris->input_right;
-	int move_down = tetris->input_down;
-	int rotate = tetris->input_rotate;
-	int drop = tetris->input_drop;
-	tetris->input_left = tetris->input_right = tetris->input_down = tetris->input_rotate = tetris->input_drop = 0;
+	int move_left = tetris_input->input_left;
+	int move_right = tetris_input->input_right;
+	int move_down = tetris_input->input_down;
+	int rotate = tetris_input->input_rotate;
+	int drop = tetris_input->input_drop;
+
+	tetris_input->input_left =
+	tetris_input->input_right =
+	tetris_input->input_down =
+	tetris_input->input_rotate =
+	tetris_input->input_drop = 0;
+
+	if (0)
+	tetris_printf("tetris_input_2 %d,%d,%d,%d,%d\n"
+		, tetris_input->input_left
+		, tetris_input->input_right
+		, tetris_input->input_down
+		, tetris_input->input_rotate
+		, tetris_input->input_drop);
 
 	int difficulty = 1 + tetris->lines_cleared / 10;
 	i64 drop_delay = 1000 * 1000 / difficulty;
