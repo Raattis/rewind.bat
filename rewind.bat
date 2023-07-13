@@ -84,7 +84,7 @@ if not exist %compiler_executable% (
 	echo #line 0 "%~n0%~x0"
 	echo #if GOTO_BOOTSTRAP_BUILDER
 	type %~n0%~x0
-) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
+) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
 @rem ) | %compiler_executable% -o %~n0.exe  -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
 
 if %errorlevel% == 0 (
@@ -123,8 +123,8 @@ enum { TRACE=1 };
 typedef struct
 {
 	int stop;
-	int request_recompile;
 	int was_recompiled;
+	int redraw_requested;
 	int replay;
 	unsigned long long buffer_size;
 	char* buffer;
@@ -144,6 +144,14 @@ typedef struct
 #include <time.h>
 
 #include <libtcc.h>
+
+#include "wm_message_to_string.h"
+
+enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=0&&TRACE };
+
+#define input_printf(...) do { if (TRACE_INPUT) printf(__VA_ARGS__); } while(0)
+#define tick_printf(...) do { if (TRACE_TICKS) printf(__VA_ARGS__); } while(0)
+
 
 typedef struct stat file_timestamp;
 
@@ -335,32 +343,251 @@ int get_any_newer_file_timestamp(file_timestamp* stamp, struct headers_and_sourc
 	return found;
 }
 
+typedef struct
+{
+	PAINTSTRUCT ps;
+	HDC screen_device_context;
+	HDC hdc;
+	HBITMAP bitmap;
+	HGDIOBJ previous_gdi_object;
+	int screen_width;
+	int screen_height;
+} Drawer;
+
+void open_drawer(HWND hWnd, Drawer* drawer)
+{
+	RECT screen_rect;
+	GetClientRect(hWnd, &screen_rect);
+	drawer->screen_width = screen_rect.right;
+	drawer->screen_height = screen_rect.bottom;
+
+	drawer->screen_device_context = BeginPaint(hWnd, &drawer->ps);
+	drawer->hdc = CreateCompatibleDC(drawer->screen_device_context);
+	drawer->bitmap = CreateCompatibleBitmap(drawer->screen_device_context, drawer->screen_width, drawer->screen_height);
+	drawer->previous_gdi_object = SelectObject(drawer->hdc, drawer->bitmap);
+}
+
+void close_drawer(HWND hWnd, Drawer* drawer)
+{
+	BitBlt(drawer->screen_device_context, 0, 0, drawer->screen_width, drawer->screen_height, drawer->hdc, 0, 0, SRCCOPY);
+
+	SelectObject(drawer->hdc, drawer->previous_gdi_object);
+	DeleteObject(drawer->bitmap);
+	DeleteDC(drawer->hdc);
+	ReleaseDC(hWnd, drawer->screen_device_context);
+	EndPaint(hWnd, &drawer->ps);
+}
+
+typedef int (*Key_Down_Func)(Communication* communication, int vk_key_code);
 typedef void (*Update_Func)(Communication* communication);
+typedef void (*Paint_Func)(Communication* communication, Drawer* drawer);
+
 typedef LRESULT (*Window_Message_Handler_Func)(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 struct Tick_Data
 {
 	int state_offset;
 	int source_offset;
+	int key_down_func_offset;
 	int update_func_offset;
-	int message_handler_func_offset;
+	int paint_func_offset;
+
+	int redraw_requested;
+	int stop;
 };
 
 static const struct Tick_Data* g_tick_data = 0;
-static void* g_program_buffer = 0;
+static void* g_state_buffer_start = 0;
+static const void* g_program_buffer_start = 0;
+static int g_window_close_requested = 0;
+static int g_stopping = 0;
+static void* g_user_buffer = 0;
 
-// Have this up here to prevent moving the function address due to resizing other functions when recompiling.
 LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-	Window_Message_Handler_Func handler = g_tick_data ? g_program_buffer + g_tick_data->message_handler_func_offset : 0;
-	if (handler)
-		return handler(hWnd, message, wParam, lParam);
-	else
-		return DefWindowProc(hWnd, message, wParam, lParam);
+	input_printf("\n\twindow_message_handler_impl(%s, %lld, %lld) ", wm_get_string(message), (long long)wParam, (long long)lParam);
+
+	switch (message)
+	{
+		case WM_CREATE:
+		{
+			if (!SetWindowPos(hWnd, NULL, 1400, 70, 0, 0, SWP_NOSIZE | SWP_NOZORDER))
+				FATAL(0, "Failed to position window. Error: ", GetLastError());
+
+			//CREATESTRUCT *pCreate = (CREATESTRUCT*)lParam;
+			//State* state = (State*)pCreate->lpCreateParams;
+			//FATAL(state->initialized == StateInitializedMagicNumber, "State not initialized in message loop.");
+			//SetLastError(0);
+			//if (!SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)state) && GetLastError() != 0)
+			//	printf("State set failed. Error: %d\n", GetLastError());
+
+			return 0;
+		}
+		case WM_ERASEBKGND:
+			//printf("WM_ERASEBKGND\n");
+			break;
+		case WM_SETREDRAW:
+			printf("WM_SETREDRAW\n");
+			break;
+		case WM_PAINT:
+		{
+			//printf("WM_PAINT\n");
+			
+			Communication communication = {0};
+			//communication.buffer = GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			if (g_tick_data)
+				communication.buffer = g_state_buffer_start + g_tick_data->state_offset;
+
+			Drawer drawer;
+			open_drawer(hWnd, &drawer);
+			
+			Paint_Func paint = (Paint_Func)(g_program_buffer_start + g_tick_data->paint_func_offset);
+			paint(&communication, &drawer);
+
+			close_drawer(hWnd, &drawer);
+			return 1;
+		}
+		case WM_KEYDOWN:
+		{
+			if (wParam == VK_ESCAPE)
+			{
+				printf("VK_ESCAPE\n");
+				DestroyWindow(hWnd);
+				g_window_close_requested = 1;
+				return 0;
+			}
+
+			if (g_user_buffer)
+			{
+				Communication communication = {0};
+				communication.buffer = g_user_buffer;
+
+				Key_Down_Func key_down = (Key_Down_Func)(g_program_buffer_start + g_tick_data->key_down_func_offset);
+				if (!key_down(&communication, wParam))
+					return 0;
+			}
+
+			break;
+		}
+		case WM_QUIT:
+			printf("WM_QUIT\n");
+			break;
+		case WM_DESTROY:
+		{
+			printf("WM_DESTROY\n");
+			//PostQuitMessage(0);
+			g_stopping = 1;
+			// fallthrough
+		}
+		default:
+			//printf("%x\n", message);
+			break;
+	}
+	return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
-Window_Message_Handler_Func get_window_message_handler()
+HWND create_window(void)
 {
-	return &window_message_handler;
+	trace_printf("create_window\n");
+
+	WNDCLASSEX wcex;
+	memset(&wcex, 0, sizeof(WNDCLASSEX));
+	wcex.cbSize = sizeof(WNDCLASSEX);
+	wcex.style = CS_HREDRAW | CS_VREDRAW;
+	wcex.lpfnWndProc = window_message_handler;
+	wcex.hInstance = GetModuleHandle(NULL);
+	wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
+	wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+	wcex.lpszClassName = "MyWindowClass";
+	RegisterClassEx(&wcex);
+
+	RECT rc = { 0, 0, 400, 300 };
+	AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+
+	// TODO: No hardcoded name. Get the name of the executable from commandline arguments.
+	HWND hWnd = CreateWindow("MyWindowClass", GetCommandLine(), WS_OVERLAPPEDWINDOW,
+		CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
+		NULL, NULL, GetModuleHandle(NULL), NULL);
+	ShowWindow(hWnd, SW_SHOW);
+
+	return hWnd;
+}
+
+void poll_messages(HWND hWnd, void* user_buffer)
+{
+	input_printf("poll_messages { ");
+
+	if (!hWnd)
+		return;
+
+	int message_received = 0;
+
+	g_user_buffer = user_buffer;
+
+	MSG msg;
+	while (PeekMessage(&msg, hWnd, 0, 0, PM_REMOVE))
+	{
+		message_received = 1;
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	g_user_buffer = 0;
+
+	if (message_received)
+		input_printf("\n}\n");
+	else
+		input_printf("} ");
+
+	return;
+}
+
+void rect(Drawer* drawer, int x, int y, int w, int h, int r, int g, int b)
+{
+	RECT rect = {x, y, x+w, y+h};
+	HBRUSH brush = CreateSolidBrush(RGB(r,g,b));
+	int success = FillRect(drawer->hdc, &rect, brush);
+	if (success < 0)
+		fprintf(stderr, "Failed to draw a rectangle. (%d, %d, %d, %d)", x,y, w,h);
+	DeleteObject(brush);
+}
+
+void text(Drawer* drawer, int x, int y, char* str, int strLen)
+{
+	RECT rect = {x, y, x, y};
+	DrawTextExA(drawer->hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
+}
+
+void get_screen_width_and_height(Drawer* drawer, int* screen_width, int* screen_height)
+{
+	FATAL(screen_height || screen_width, "Don't call this for no reason...");
+
+	if (screen_height) *screen_height = drawer->screen_height;
+	if (screen_width) *screen_width = drawer->screen_width;
+}
+
+void pixel(Drawer* drawer, int x, int y, int r, int g, int b)
+{
+	int success = SetPixel(drawer->hdc, x, y, RGB(r, g, b));
+	//if (success < 0)
+	//	fprintf(stderr, "Failed to set pixel to color. (%d, %d) -> (%d,%d,%d)", x,y, r,g,b);
+}
+
+void fill(Drawer* drawer, int r, int g, int b)
+{
+	int w = drawer->screen_width;
+	int h = drawer->screen_height; //GetDeviceCaps(drawer->hdc, VERTRES);
+	rect(drawer, 0,0, w,h, r,g,b);
+}
+
+void text_w(Drawer* drawer, int x, int y, wchar_t* str, int strLen)
+{
+	RECT rect = {x, y, x, y};
+	DrawTextExW(drawer->hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
+}
+
+int is_window_open(HWND hWnd)
+{
+	return !!IsWindow(hWnd);
 }
 
 void wait_for_change(file_timestamp* newest_file_timestamp, struct headers_and_sources* headers_and_sources)
@@ -401,13 +628,14 @@ void run_recompilation_loop()
 	void* program_buffer = malloc(program_buffer_size);
 	const void* program_buffer_start = program_buffer;
 	const void* program_buffer_end = program_buffer + program_buffer_size;
-	g_program_buffer = program_buffer;
+	g_program_buffer_start = program_buffer;
 
 	int state_size = user_buffer_size;
-	int state_max_count = 60; //16 * 1024;
+	int state_max_count = 16 * 1024;
 	void* state_buffer = malloc(state_size * state_max_count);
 	const void* state_buffer_start = state_buffer;
 	const void* state_buffer_end = state_buffer + state_size * state_max_count;
+	g_state_buffer_start = state_buffer;
 
 	int tick_data_buffer_count = state_max_count;
 	struct Tick_Data* tick_data_buffer = (struct Tick_Data*)malloc(tick_data_buffer_count * sizeof(struct Tick_Data));
@@ -415,9 +643,11 @@ void run_recompilation_loop()
 	const struct Tick_Data* tick_data_buffer_end = tick_data_buffer + tick_data_buffer_count;
 	int tick_count = 0;
 
+	HWND hWnd = create_window();
+
 	for (;;)
 	{
-		trace_printf("\rTicks left: %lld, %lld, %lld, %lld ", tick_data_buffer - tick_data_buffer_start, state_buffer - state_buffer_start, program_buffer - program_buffer_start, source_buffer - source_buffer_start);
+		tick_printf("\rTicks left: %lld, %lld, %lld, %lld ", tick_data_buffer - tick_data_buffer_start, state_buffer - state_buffer_start, program_buffer - program_buffer_start, source_buffer - source_buffer_start);
 
 		if (tick_data_buffer >= tick_data_buffer_end)
 		{
@@ -432,7 +662,7 @@ void run_recompilation_loop()
 		else
 			memcpy(&new_tick, g_tick_data, sizeof(struct Tick_Data));
 
-		trace_printf("tick(%d,%d,%d,%d), ", new_tick.state_offset, new_tick.update_func_offset, new_tick.message_handler_func_offset, new_tick.source_offset);
+		tick_printf("tick(%d,%d,%d,%d), ", new_tick.state_offset, new_tick.update_func_offset, new_tick.paint_func_offset, new_tick.key_down_func_offset, new_tick.source_offset);
 
 		int was_recompiled = 0;
 
@@ -474,7 +704,8 @@ void run_recompilation_loop()
 				src_end = src + read_length + 1;
 			}
 
-			new_tick.message_handler_func_offset = -1;
+			new_tick.paint_func_offset = -1;
+			new_tick.key_down_func_offset = -1;
 
 			if (s)
 				tcc_delete(s);
@@ -498,13 +729,19 @@ void run_recompilation_loop()
 
 			trace_printf("tcc_add_library_err  \n");
 			extern int tcc_add_library_err(TCCState *s, const char *f);
-			tcc_add_library_err(s, "gdi32");
+			//tcc_add_library_err(s, "gdi32");
 			tcc_add_library_err(s, "msvcrt");
 			tcc_add_library_err(s, "kernel32");
 			tcc_add_library_err(s, "user32");
 
 			trace_printf("tcc_add_symbol \n");
-			tcc_add_symbol(s, "get_window_message_handler", get_window_message_handler);
+			//tcc_add_symbol(s, "get_window_message_handler", get_window_message_handler);
+			tcc_add_symbol(s, "get_screen_width_and_height", get_screen_width_and_height);
+			tcc_add_symbol(s, "rect", rect);
+			tcc_add_symbol(s, "text", text);
+			tcc_add_symbol(s, "fill", fill);
+			tcc_add_symbol(s, "pixel", pixel);
+			tcc_add_symbol(s, "text_w", text_w);
 
 			trace_printf("Compiling\n");
 			if (-1 == tcc_compile_string(s, source_buffer))
@@ -569,10 +806,18 @@ void run_recompilation_loop()
 				continue;
 			}
 
-			Window_Message_Handler_Func message_handler_func = tcc_get_symbol(s, "window_message_handler_impl");
-			if (!message_handler_func)
+			Paint_Func paint  = tcc_get_symbol(s, "paint");
+			if (!paint)
 			{
-				fprintf(stderr, "Failed to load the 'window_message_handler_impl' symbol after recompilation.\n");
+				fprintf(stderr, "Failed to load the 'paint' symbol after recompilation.\n");
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
+				continue;
+			}
+
+			Key_Down_Func key_down  = tcc_get_symbol(s, "key_down");
+			if (!key_down)
+			{
+				fprintf(stderr, "Failed to load the 'key_down' symbol after recompilation.\n");
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
@@ -581,7 +826,8 @@ void run_recompilation_loop()
 			source_buffer = src_end;
 
 			new_tick.update_func_offset = ((char*)update) - program_buffer_start;
-			new_tick.message_handler_func_offset = ((char*)message_handler_func) - program_buffer_start;
+			new_tick.paint_func_offset = ((char*)paint) - program_buffer_start;
+			new_tick.key_down_func_offset = ((char*)key_down) - program_buffer_start;
 
 			program_buffer += program_size;
 			get_headers_and_sources(b_source_filename, headers_and_sources);
@@ -596,14 +842,8 @@ void run_recompilation_loop()
 			continue;
 		}
 
+		FATAL(new_tick.update_func_offset > 0, "'update' not loaded.");
 		Update_Func update = (Update_Func)(program_buffer_start + new_tick.update_func_offset);
-		if (new_tick.update_func_offset <= 0)
-		{
-			FATAL(0, "'update' not loaded.");
-			force_recompile = 1;
-			Sleep(500);
-			continue;
-		}
 
 		Communication communication = {0};
 		communication.was_recompiled = was_recompiled;
@@ -611,44 +851,56 @@ void run_recompilation_loop()
 		communication.buffer_size = 1000;
 
 		update(&communication);
-		if (communication.stop != 0)
-			break;
 
-		if (communication.request_recompile != 0)
-			force_recompile = 1;
+		if (communication.redraw_requested)
+			RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
+
+		// Paint and input
+		poll_messages(hWnd, user_buffer);
+
+		new_tick.redraw_requested = communication.redraw_requested;
+		new_tick.stop = communication.stop || g_stopping || g_window_close_requested;
 
 		new_tick.state_offset = state_buffer - state_buffer_start;
-		memcpy(state_buffer, user_buffer, sizeof(user_buffer_size));
+		memcpy(state_buffer, user_buffer, user_buffer_size);
 		state_buffer += state_size;
 
 		memcpy(tick_data_buffer, &new_tick, sizeof(struct Tick_Data));
 		g_tick_data = tick_data_buffer;
 		tick_data_buffer += 1;
+
+		if (new_tick.stop != 0)
+			break;
+
 		continue;
 	}
 
 	if (s)
 		tcc_delete(s);
 
-	for(const struct Tick_Data* tick = tick_data_buffer_start; tick < tick_data_buffer_end; tick++)
+	if (!is_window_open(hWnd))
+		hWnd = create_window();
+
+	for(const struct Tick_Data* tick = tick_data_buffer_start; tick <= tick_data_buffer; tick++)
 	{
-		trace_printf("\rTicks left: %lld, ", tick - tick_data_buffer_start);
-		trace_printf("tick(%d,%d,%d,%d), ", tick->state_offset, tick->update_func_offset, tick->message_handler_func_offset, tick->source_offset);
+		tick_printf("\rTicks left: %lld, ", tick - tick_data_buffer_start);
+		tick_printf("tick(%d,%d,%d,%d), ", tick->state_offset, tick->update_func_offset, tick->paint_func_offset, tick->key_down_func_offset, tick->source_offset);
 
 		g_tick_data = tick;
 
-		Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
+		if (tick->redraw_requested)
+			RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
 
-		Communication communication = {0};
-		communication.was_recompiled = 0;
-		communication.buffer = state_buffer_start + tick->state_offset;
-		communication.buffer_size = 1000;
-		communication.replay = 1;
+		poll_messages(hWnd, 0);
 
-		update(&communication);
-
-		if (communication.stop != 0)
+		if (tick->stop)
+		{
+			DestroyWindow(hWnd);
 			break;
+		}
+
+		if (tick->redraw_requested)
+			Sleep(2);
 	}
 
 	return;
@@ -679,35 +931,6 @@ void _runmain() { _start(); }
 #include <windows.h>
 #include <time.h>
 
-#include "wm_message_to_string.h"
-
-typedef struct
-{
-	PAINTSTRUCT ps;
-	HDC screen_device_context;
-	HDC hdc;
-	HBITMAP bitmap;
-	HGDIOBJ previous_gdi_object;
-	int screen_width;
-	int screen_height;
-} Drawer;
-
-void rect(Drawer drawer, int x, int y, int w, int h, int r, int g, int b)
-{
-	RECT rect = {x, y, x+w, y+h};
-	HBRUSH brush = CreateSolidBrush(RGB(r,g,b));
-	int success = FillRect(drawer.hdc, &rect, brush);
-	if (success < 0)
-		fprintf(stderr, "Failed to draw a rectangle. (%d, %d, %d, %d)", x,y, w,h);
-	DeleteObject(brush);
-}
-
-void text(Drawer drawer, int x, int y, char* str, int strLen)
-{
-	RECT rect = {x, y, x, y};
-	DrawTextExA(drawer.hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
-}
-
 typedef signed long long i64;
 i64 microseconds()
 {
@@ -722,7 +945,6 @@ typedef struct
 	HWND hWnd;
 	int initialized;
 	int redraw_requested;
-	int window_closed;
 	unsigned tick;
 	int x, y;
 	unsigned long long old_window_proc;
@@ -732,62 +954,16 @@ typedef struct
 
 enum { StateInitializedMagicNumber = 123456 };
 
-Drawer make_drawer(HWND hWnd)
+typedef void Drawer;
+
+void paint(Communication* communication, Drawer* drawer)
 {
-	Drawer drawer;
-
-	RECT screen_rect;
-	GetClientRect(hWnd, &screen_rect);
-	drawer.screen_width = screen_rect.right;
-	drawer.screen_height = screen_rect.bottom;
-
-	drawer.screen_device_context = BeginPaint(hWnd, &drawer.ps);
-	drawer.hdc = CreateCompatibleDC(drawer.screen_device_context);
-	drawer.bitmap = CreateCompatibleBitmap(drawer.screen_device_context, drawer.screen_width, drawer.screen_height);
-	drawer.previous_gdi_object = SelectObject(drawer.hdc, drawer.bitmap);
-	return drawer;
-}
-
-void free_drawer(HWND hWnd, Drawer drawer)
-{
-	BitBlt(drawer.screen_device_context, 0, 0, drawer.screen_width, drawer.screen_height, drawer.hdc, 0, 0, SRCCOPY);
-
-	SelectObject(drawer.hdc, drawer.previous_gdi_object);
-	DeleteObject(drawer.bitmap);
-	DeleteDC(drawer.hdc);
-	ReleaseDC(hWnd, drawer.screen_device_context);
-	EndPaint(hWnd, &drawer.ps);
-}
-
-void pixel(Drawer drawer, int x, int y, int r, int g, int b)
-{
-	int success = SetPixel(drawer.hdc, x, y, RGB(r, g, b));
-	//if (success < 0)
-	//	fprintf(stderr, "Failed to set pixel to color. (%d, %d) -> (%d,%d,%d)", x,y, r,g,b);
-}
-
-void fill(Drawer drawer, int r, int g, int b)
-{
-	int w = GetDeviceCaps(drawer.hdc, HORZRES);
-	int h = GetDeviceCaps(drawer.hdc, VERTRES);
-	rect(drawer, 0,0, w,h, r,g,b);
-}
-
-void text_w(Drawer drawer, int x, int y, wchar_t* str, int strLen)
-{
-	RECT rect = {x, y, x, y};
-	DrawTextExW(drawer.hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
-}
-
-void paint(HWND hWnd, State* state)
-{
-	trace_printf("paint ");
-
-	Drawer drawer = make_drawer(hWnd);
+	//trace_printf("paint ");
 
 	fill(drawer, 255, 255, 255);
 	rect(drawer, 20, 20, 200, 200, 255, 255, 0);
 
+	State* state = (State*)communication->buffer;
 	if (state)
 	{
 		for (int x = state->x - 50; x < state->x + 50; ++x)
@@ -799,162 +975,44 @@ void paint(HWND hWnd, State* state)
 	text(drawer, 30, 30, "Hello, World!", -1);
 	text_w(drawer, 30, 60, L"Hëllö, Wärld!", -1);
 
-	tetris_draw(drawer, &state->tetris);
-
-	free_drawer(hWnd, drawer);
+	if (state)
+		tetris_draw(drawer, &state->tetris);
 }
 
-int window_message_handler_impl(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+int key_down(Communication* communication, int vk_key_code)
 {
-	trace_printf("\n\twindow_message_handler_impl(%s, %lld, %lld) ", wm_get_string(message), (long long)wParam, (long long)lParam);
+	State* state = (State*)communication->buffer;
 
-	switch (message)
+	trace_printf("key_down ");
+	trace_printf("INPUT tetris fall timer: %lld\n", state->tetris.fall_timer);
+	trace_printf("INPUT tetris piece x,y: %d,%d\n", state->tetris.current_piece.x, state->tetris.	current_piece.y);
+
+	switch (vk_key_code)
 	{
-		case WM_CREATE:
-		{
-			if (!SetWindowPos(hWnd, NULL, 1400, 70, 0, 0, SWP_NOSIZE | SWP_NOZORDER))
-				FATAL(0, "Failed to position window. Error: ", GetLastError());
-
-			CREATESTRUCT *pCreate = (CREATESTRUCT*)lParam;
-			State* state = (State*)pCreate->lpCreateParams;
-			FATAL(state->initialized == StateInitializedMagicNumber, "State not initialized in message loop.");
-			SetLastError(0);
-			if (!SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)state) && GetLastError() != 0)
-				printf("State set failed. Error: %d\n", GetLastError());
-
+		case VK_LEFT:
+			state->tetris.input_left = 1;
 			return 0;
-		}
-		case WM_ERASEBKGND:
-			//printf("WM_ERASEBKGND\n");
-			break;
-		case WM_SETREDRAW:
-			printf("WM_SETREDRAW\n");
-			break;
-		case WM_PAINT:
-		{
-			//printf("WM_PAINT\n");
-			State* state = (State*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-			if (!state)
-				printf("No state.\n");
-
-			paint(hWnd, state);
-			return 1;
-		}
-		case WM_KEYDOWN:
-		{
-			if (wParam == VK_ESCAPE)
-			{
-				printf("VK_ESCAPE\n");
-				DestroyWindow(hWnd);
-				return 0;
-			}
-
-			State *state = (State*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-			switch (wParam)
-			{
-				case VK_LEFT:
-					state->tetris.input_left = 1;
-					return 0;
-				case VK_RIGHT:
-					state->tetris.input_right = 1;
-					return 0;
-				case VK_DOWN:
-					state->tetris.input_down = 1;
-					return 0;
-				case VK_UP:
-					state->tetris.input_rotate = 1;
-					return 0;
-				case VK_SPACE:
-					state->tetris.input_drop = 1;
-					return 0;
-			}
-
-			break;
-		}
-		case WM_QUIT:
-			printf("WM_QUIT\n");
-			break;
-		case WM_DESTROY:
-		{
-			printf("WM_DESTROY\n");
-			//PostQuitMessage(0);
-			State *state = (State*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-			if (state)
-				state->window_closed = 1;
-			// fallthrough
-		}
-		default:
-			//printf("%x\n", message);
-			break;
+		case VK_RIGHT:
+			state->tetris.input_right = 1;
+			return 0;
+		case VK_DOWN:
+			state->tetris.input_down = 1;
+			return 0;
+		case VK_UP:
+			state->tetris.input_rotate = 1;
+			return 0;
+		case VK_SPACE:
+			state->tetris.input_drop = 1;
+			return 0;
 	}
-	return DefWindowProc(hWnd, message, wParam, lParam);
-}
-
-typedef LRESULT (*Window_Message_Handler_Func)(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-extern Window_Message_Handler_Func get_window_message_handler();
-
-void create_window(State* state)
-{
-	trace_printf("create_window\n");
-
-	Window_Message_Handler_Func window_message_handler = get_window_message_handler();
-	FATAL(window_message_handler, "get_window_message_handler() returned nothing.");
-	state->old_window_proc = (unsigned long long)window_message_handler;
-
-	WNDCLASSEX wcex;
-	memset(&wcex, 0, sizeof(WNDCLASSEX));
-	wcex.cbSize = sizeof(WNDCLASSEX);
-	wcex.style = CS_HREDRAW | CS_VREDRAW;
-	wcex.lpfnWndProc = window_message_handler;
-	wcex.hInstance = GetModuleHandle(NULL);
-	wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
-	wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-	wcex.lpszClassName = "MyWindowClass";
-	RegisterClassEx(&wcex);
-
-	RECT rc = { 0, 0, 400, 300 };
-	AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-
-	// TODO: No hardcoded name. Get the name of the executable from commandline arguments.
-	state->hWnd = CreateWindow("MyWindowClass", GetCommandLine(), WS_OVERLAPPEDWINDOW,
-		CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
-		NULL, NULL, GetModuleHandle(NULL), state);
-	ShowWindow(state->hWnd, SW_SHOW);
-}
-
-int poll_messages(State* state)
-{
-	trace_printf("poll_messages { %d ", state->tick);
-
-	if (!state->hWnd)
-		return 0;
-
-	int message_received = 0;
-
-	MSG msg;
-	while (PeekMessage(&msg, state->hWnd, 0, 0, PM_REMOVE))
-	{
-		message_received = 1;
-		TranslateMessage(&msg);
-		DispatchMessage(&msg);
-	}
-
-	if (message_received)
-		trace_printf("\n}\n");
-	else
-		trace_printf("} ");
-	return 0;
+	
+	return 1;
 }
 
 static void setup(State* state)
 {
 	if (state->initialized == StateInitializedMagicNumber)
-	{
-		FATAL(state->old_window_proc == (unsigned long long)get_window_message_handler()
-			, "Window message handler function address moved. 0x%X == 0x%X\n"
-			, state->old_window_proc, (unsigned long long)get_window_message_handler());
 		return;
-	}
 
 	trace_printf("Clearing state...\n");
 	memset(state, 0, sizeof(*state));
@@ -965,19 +1023,17 @@ static void setup(State* state)
 	state->x = 200;
 	state->y = 150;
 
-	create_window(state);
-
 	printf("\n\nGo to the `tick` function at line %d of this source file and edit the 'state->x' and 'state->y' variables or something and see what happens. :)\n\n", __LINE__ + 3);
 }
 
-void tick(State* state)
+static void tick(State* state)
 {
 	// Modify these, save and note the cross in the window being painted to a different spot
 	state->x = 200;
 	state->y = 100;
 
 	if (tetris_update(&state->tetris))
-		state->redraw_requested = 1;
+		state->redraw_requested = 2;
 }
 
 void update(Communication* communication)
@@ -988,37 +1044,22 @@ void update(Communication* communication)
 
 	State* state = (State*)communication->buffer;
 
-	if (!communication->replay)
-		setup(state);
+	setup(state);
 
 	state->tick += 1;
-	if (state->tick % 100 == 0)
+	if (state->tick % 10 == 0)
 		printf("update(%5d)\n", state->tick);
 
-	if (!communication->replay)
-		tick(state);
+	tick(state);
 
-	if (state->hWnd && (communication->was_recompiled || state->redraw_requested || communication->replay))
-	{
-		state->redraw_requested = 0;
-		RedrawWindow(state->hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
-	}
-
-	if (poll_messages(state) != 0)
-		communication->stop = 1;
-
-	if (state->window_closed)
-		communication->stop = 1;
+	communication->redraw_requested = 0 != state->redraw_requested;
+	if (state->redraw_requested > 0)
+		state->redraw_requested--;
 
 	i64 d = microseconds() - t;
-	printf("%lldms\r", (d/1000) % 1000);
+	trace_printf("%lldms\r", (d/1000) % 1000);
 
 	Sleep(16);
-}
-
-__declspec(dllexport) void dll_update(Communication* communication)
-{
-	update(communication);
 }
 
 #endif // RUNTIME_LOOP

@@ -114,11 +114,15 @@ int move_to(Tetris* tetris, int x, int y, int r)
 	return move_piece_to(&tetris->current_piece, tetris, x, y, r);
 }
 
-void tetris_draw(Drawer drawer, Tetris* tetris)
+typedef void Drawer;
+void tetris_draw(Drawer* drawer, Tetris* tetris)
 {
-	RECT screen_rect;
-	GetClientRect(WindowFromDC(drawer.screen_device_context), &screen_rect);
-	int screen_height = screen_rect.bottom - screen_rect.top;
+	//trace_printf("DRAW tetris fall timer: %lld\n", tetris->fall_timer);
+	//trace_printf("DRAW tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
+
+	int screen_width, screen_height;
+	get_screen_width_and_height(drawer, &screen_width, &screen_height);
+
 	int h = (screen_height - 20) / TetrisHeight;
 	int w = h;
 	int margin = w/2;
@@ -181,14 +185,17 @@ void tetris_draw(Drawer drawer, Tetris* tetris)
 
 	char score_buffer[32];
 	sprintf(score_buffer, "%d", tetris->score);
-	text(drawer, drawer.screen_width / 2, 30, score_buffer, -1);
+	text(drawer, screen_width / 2, 30, score_buffer, -1);
 
 	if (tetris->game_over)
-		text(drawer, drawer.screen_width / 2, 60, "Game Over!", -1);
+		text(drawer, screen_width / 2, 60, "Game Over!", -1);
 }
 
 int tetris_update(Tetris* tetris)
 {
+	//trace_printf("tetris fall timer: %lld\n", tetris->fall_timer);
+	//trace_printf("tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
+
 	enum { TetrisInitializedMagicNumber = 737215 };
 
 	if (tetris->magic_number != TetrisInitializedMagicNumber
