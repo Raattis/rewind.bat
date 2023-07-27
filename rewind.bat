@@ -970,9 +970,10 @@ void run_recompilation_loop()
 		poll_repaint(hWnd, user_buffer);
 
 		if (tick->stop)
-		{
 			break;
-		}
+
+		if (communication.redraw_requested)
+			Sleep(16);
 	}
 
 	Sleep(1000);
@@ -1031,8 +1032,6 @@ typedef void Drawer;
 
 void paint(Communication* communication, Drawer* drawer)
 {
-	trace_printf("paint ");
-
 	fill(drawer, 255, 255, 255);
 	rect(drawer, 20, 20, 200, 200, 255, 255, 0);
 
