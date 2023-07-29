@@ -116,7 +116,7 @@ int main()
 
 #ifdef SHARED_PREFIX
 
-enum { TRACE=1 };
+enum { TRACE=0 };
 #define trace_printf(...) do { if (TRACE) printf(__VA_ARGS__); } while(0)
 #define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); int system(const char*); system("pause"); void exit(int); exit(1); } while(0)
 
@@ -125,6 +125,7 @@ typedef struct
 	int stop;
 	int skip;
 	int redraw_requested;
+	int ghost_frame;
 	signed long long time_us;
 	unsigned long long input_buffer_size;
 	char* input_buffer;
@@ -149,7 +150,7 @@ typedef struct
 
 #include "wm_message_to_string.h"
 
-enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=0&&TRACE };
+enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=1&&TRACE };
 
 #define input_printf(...) do { if (TRACE_INPUT) printf(__VA_ARGS__); } while(0)
 #define tick_printf(...) do { if (TRACE_TICKS) printf(__VA_ARGS__); } while(0)
@@ -405,12 +406,16 @@ struct Tick_Data
 	int stop;
 };
 
-static const struct Tick_Data* g_tick_data = 0;
-static const void* g_program_buffer_start = 0;
-static int g_window_close_requested = 0;
-static int g_stopping = 0;
-static void* g_input_buffer = 0;
-static void* g_user_buffer = 0;
+typedef struct
+{
+	int window_close_requested;
+	int stopping;
+
+	void* user_buffer;
+	void* input_buffer;
+	Paint_Func paint_func;
+	Key_Down_Func key_down_func;
+} MessageHandlingData;
 
 LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -423,56 +428,55 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 			if (!SetWindowPos(hWnd, NULL, 1400, 70, 0, 0, SWP_NOSIZE | SWP_NOZORDER))
 				FATAL(0, "Failed to position window. Error: ", GetLastError());
 
-			//CREATESTRUCT *pCreate = (CREATESTRUCT*)lParam;
-			//State* state = (State*)pCreate->lpCreateParams;
-			//FATAL(state->initialized == StateInitializedMagicNumber, "State not initialized in message loop.");
-			//SetLastError(0);
-			//if (!SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)state) && GetLastError() != 0)
-			//	printf("State set failed. Error: %d\n", GetLastError());
-
 			return 0;
 		}
 		case WM_ERASEBKGND:
-			//printf("WM_ERASEBKGND\n");
 			break;
 		case WM_SETREDRAW:
-			printf("WM_SETREDRAW\n");
 			break;
 		case WM_PAINT:
 		{
+			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			FATAL(message_handling_data, "message_handling_data was NULL in %s", wm_get_string(message));
+			FATAL(message_handling_data->paint_func, "paint_func was not set for %s", wm_get_string(message));
+			FATAL(message_handling_data->user_buffer, "user_buffer was not set for %s", wm_get_string(message));
+
 			Communication communication = {0};
-			communication.user_buffer = g_user_buffer;
+			communication.user_buffer = message_handling_data->user_buffer;
 
 			Drawer drawer;
 			open_drawer(hWnd, &drawer);
 
-			Paint_Func paint = (Paint_Func)(g_program_buffer_start + g_tick_data->paint_func_offset);
-			paint(&communication, &drawer);
+			message_handling_data->paint_func(&communication, &drawer);
 
 			close_drawer(hWnd, &drawer);
 			return 1;
 		}
 		case WM_KEYDOWN:
 		{
+			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			FATAL(message_handling_data, "message_handling_data was NULL in %s", wm_get_string(message));
+			FATAL(message_handling_data->key_down_func, "paint_func was not set for %s", wm_get_string(message));
+			FATAL(message_handling_data->input_buffer, "input_buffer was not set for %s", wm_get_string(message));
+
 			if (wParam == VK_ESCAPE)
 			{
 				printf("VK_ESCAPE\n");
 				DestroyWindow(hWnd);
-				g_window_close_requested = 1;
+				message_handling_data->window_close_requested = 1;
 				return 0;
 			}
 
-			if (!g_input_buffer)
+			Communication communication = {0};
+			communication.input_buffer = message_handling_data->input_buffer;
+
+			if (!communication.input_buffer)
 			{
 				fprintf(stderr, "Trying to handle input with user buffer not defined.");
 			}
 			else
 			{
-				Communication communication = {0};
-				communication.input_buffer = g_input_buffer;
-
-				Key_Down_Func key_down = (Key_Down_Func)(g_program_buffer_start + g_tick_data->key_down_func_offset);
-				if (!key_down(&communication, wParam))
+				if (!message_handling_data->key_down_func(&communication, wParam))
 					return 0;
 			}
 
@@ -484,8 +488,10 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 		case WM_DESTROY:
 		{
 			printf("WM_DESTROY\n");
-			//PostQuitMessage(0);
-			g_stopping = 1;
+
+			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			if (message_handling_data)
+				message_handling_data->stopping = 1;
 			// fallthrough
 		}
 		default:
@@ -522,14 +528,17 @@ HWND create_window(void)
 	return hWnd;
 }
 
-void poll_repaint(HWND hWnd, void* user_buffer)
+int poll_repaint(HWND hWnd, Paint_Func paint_func, void* user_buffer)
 {
 	input_printf("poll_repaint { ");
 
 	if (!hWnd)
-		return;
+		return 0;
 
-	g_user_buffer = user_buffer;
+	MessageHandlingData message_handling_data = {0};
+	message_handling_data.user_buffer = user_buffer;
+	message_handling_data.paint_func = paint_func;
+	SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)&message_handling_data);
 
 	int message_received = 0;
 
@@ -553,26 +562,29 @@ void poll_repaint(HWND hWnd, void* user_buffer)
 		DispatchMessage(&msg);
 	}
 
-	g_user_buffer = 0;
+	SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)0);
 
 	if (message_received)
 		input_printf("\n}\n");
 	else
 		input_printf("} ");
 
-	return;
+	return message_handling_data.stopping;
 }
 
-void poll_input(HWND hWnd, void* input_buffer)
+int poll_input(HWND hWnd, Key_Down_Func key_down_func, void* input_buffer)
 {
 	input_printf("\rpoll_input { ");
 
 	if (!hWnd)
-		return;
+		return 1;
 
 	int message_received = 0;
 
-	g_input_buffer = input_buffer;
+	MessageHandlingData message_handling_data = {0};
+	message_handling_data.input_buffer = input_buffer;
+	message_handling_data.key_down_func = key_down_func;
+	SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)&message_handling_data);
 
 	MSG msg;
 	while (PeekMessage(&msg, hWnd, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE))
@@ -582,14 +594,14 @@ void poll_input(HWND hWnd, void* input_buffer)
 		DispatchMessage(&msg);
 	}
 
-	g_input_buffer = 0;
+	SetWindowLongPtr(hWnd, GWLP_USERDATA, 0);
 
 	if (message_received)
 		input_printf("\n}\n");
 	else
 		input_printf("} ");
 
-	return;
+	return message_handling_data.window_close_requested;
 }
 
 void rect(Drawer* drawer, int x, int y, int w, int h, int r, int g, int b)
@@ -654,8 +666,189 @@ void wait_for_change(file_timestamp* newest_file_timestamp, struct headers_and_s
 	}
 }
 
-void run_recompilation_loop()
+int simulate_ghost_tick(void* user_buffer, int user_buffer_size, const struct Tick_Data* tick, const void* state_buffer_start, const void* program_buffer_start)
 {
+	FATAL(!tick->skip, "Simulating skipped ticks is not safe.");
+
+	char input_buffer[100] = {0};
+	const int input_buffer_size = sizeof(input_buffer);
+	memcpy(input_buffer, state_buffer_start + tick->state_offset, input_buffer_size);
+
+	Communication communication = {0};
+	communication.time_us = tick->time_us;
+	communication.input_buffer = input_buffer;
+	communication.input_buffer_size = input_buffer_size;
+	communication.user_buffer = user_buffer;
+	communication.user_buffer_size = user_buffer_size;
+	communication.ghost_frame = 1;
+
+	Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
+	update(&communication);
+
+	return communication.redraw_requested;
+}
+
+int simulate_tick(void* user_buffer, int user_buffer_size, const struct Tick_Data* tick, const void* state_buffer_start, const void* program_buffer_start)
+{
+	FATAL(!tick->skip, "Simulating skipped ticks is not safe.");
+
+	char input_buffer[100] = {0};
+	const int input_buffer_size = sizeof(input_buffer);
+	memcpy(input_buffer, state_buffer_start + tick->state_offset, input_buffer_size);
+
+	Communication communication = {0};
+	communication.time_us = tick->time_us;
+	communication.input_buffer = input_buffer;
+	communication.input_buffer_size = input_buffer_size;
+	communication.user_buffer = user_buffer;
+	communication.user_buffer_size = user_buffer_size;
+
+	Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
+	update(&communication);
+
+	return communication.redraw_requested;
+}
+
+void paint_tick(HWND hWnd, void* user_buffer, const struct Tick_Data* tick, const void* program_buffer_start)
+{
+	FATAL(!tick->skip, "Painting skipped ticks is not safe.");
+
+	if (tick->redraw_requested)
+		RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
+
+	Paint_Func paint_func = (void*)program_buffer_start + tick->paint_func_offset;
+	poll_repaint(hWnd, paint_func, user_buffer);
+}
+
+int replay_tick(HWND hWnd, void* user_buffer, int user_buffer_size, const struct Tick_Data* tick, const void* state_buffer_start, const void* program_buffer_start)
+{
+	tick_printf("tick(%d,%d,%d,%d), ", tick->state_offset, tick->update_func_offset, tick->paint_func_offset, tick->key_down_func_offset, tick->source_offset);
+
+	if (tick->skip)
+		return 0;
+
+	int redraw_requested = simulate_tick(user_buffer, user_buffer_size, tick, state_buffer_start, program_buffer_start);
+	if (redraw_requested)
+	{
+		paint_tick(hWnd, user_buffer, tick, program_buffer_start);
+		Sleep(16);
+	}
+
+	return tick->stop;
+}
+
+typedef struct
+{
+	int program_buffer_size;
+	void* program_buffer;
+
+	int state_stride;
+	int state_max_count;
+	void* state_buffer;
+
+	int tick_max_count;
+	struct Tick_Data* tick_data_buffer;
+} Execution_Buffers;
+
+void replay(Execution_Buffers execution_buffers)
+{
+	const struct Tick_Data* tick_data_buffer_start = execution_buffers.tick_data_buffer;
+	const void* state_buffer_start = execution_buffers.state_buffer;
+	const void* program_buffer_start = execution_buffers.program_buffer;
+
+	HWND hWnd = 0;
+	if (!is_window_open(hWnd))
+		hWnd = create_window();
+
+	char user_buffer[1000] = {0};
+	const int user_buffer_size = sizeof(user_buffer);
+
+	for(const struct Tick_Data* tick = tick_data_buffer_start;; tick++)
+	{
+		tick_printf("\rTick: %lld, ", tick - tick_data_buffer_start);
+		int stop = replay_tick(hWnd, user_buffer, user_buffer_size, tick, state_buffer_start, program_buffer_start);
+		if (stop)
+		{
+			trace_printf("STOPPING, ");
+			break;
+		}
+	}
+
+	trace_printf("Replay ended!\n");
+	Sleep(1000);
+	DestroyWindow(hWnd);
+}
+
+void do_rewind(Execution_Buffers execution_buffers)
+{
+	const struct Tick_Data* tick_data_buffer_start = execution_buffers.tick_data_buffer;
+	const void* state_buffer_start = execution_buffers.state_buffer;
+	const void* program_buffer_start = execution_buffers.program_buffer;
+
+	HWND hWnd = 0;
+	if (!is_window_open(hWnd))
+		hWnd = create_window();
+
+	char user_buffer[1000] = {0};
+	const int user_buffer_size = sizeof(user_buffer);
+
+	const struct Tick_Data* end = tick_data_buffer_start;
+	for(;; end++)
+	{
+		if (end->stop)
+			break;
+	}
+
+	const struct Tick_Data* first = tick_data_buffer_start + 1;
+	char first_user_buffer[1000] = {0};
+	simulate_ghost_tick(first_user_buffer, user_buffer_size, first, state_buffer_start, program_buffer_start);
+
+	for (const struct Tick_Data* start = first + 1; start <= end; end--)
+	{
+		tick_printf("\rTick: %lld, ", end - tick_data_buffer_start);
+
+		memcpy(user_buffer, first_user_buffer, user_buffer_size);
+
+		int repaint = 0;
+		for (const struct Tick_Data* tick = start; tick <= end; tick++)
+		{
+			if (tick->skip)
+				continue;
+
+			if (tick == end)
+				repaint = simulate_tick(user_buffer, user_buffer_size, tick, state_buffer_start, program_buffer_start);
+			else
+				simulate_ghost_tick(user_buffer, user_buffer_size, tick, state_buffer_start, program_buffer_start);
+		}
+
+		if (repaint)
+		{
+			paint_tick(hWnd, user_buffer, end, program_buffer_start);
+			Sleep(16);
+		}
+	}
+	paint_tick(hWnd, first_user_buffer, first, program_buffer_start);
+
+	trace_printf("Replay ended!\n");
+	Sleep(1000);
+	DestroyWindow(hWnd);
+}
+
+void run_recompilation_loop(Execution_Buffers execution_buffers)
+{
+	void* program_buffer_write_head = execution_buffers.program_buffer;
+	const void* program_buffer_start = execution_buffers.program_buffer;
+	const void* program_buffer_end = execution_buffers.program_buffer + execution_buffers.program_buffer_size;
+
+	const int state_stride = execution_buffers.state_stride;
+	void* state_buffer_write_head = execution_buffers.state_buffer;
+	const void* state_buffer_start = execution_buffers.state_buffer;
+	const void* state_buffer_end = execution_buffers.state_buffer + (state_stride * execution_buffers.state_max_count);
+
+	struct Tick_Data* tick_data_buffer_write_head = execution_buffers.tick_data_buffer;
+	const struct Tick_Data* tick_data_buffer_start = execution_buffers.tick_data_buffer;
+	const struct Tick_Data* tick_data_buffer_end = execution_buffers.tick_data_buffer + execution_buffers.tick_max_count * sizeof(struct Tick_Data);
+
 	void* malloc(size_t);
 	struct headers_and_sources* headers_and_sources = (struct headers_and_sources*)malloc(sizeof(struct headers_and_sources));
 	memset(headers_and_sources, 0, sizeof(*headers_and_sources));
@@ -664,10 +857,11 @@ void run_recompilation_loop()
 	file_timestamp newest_file_timestamp;
 	get_file_timestamp(&newest_file_timestamp, b_source_filename);
 
-	int user_buffer_size = 1000;
-	void* user_buffer = malloc(user_buffer_size);
-	int input_buffer_size = 100;
-	void* input_buffer = malloc(input_buffer_size);
+	char user_buffer[1000] = {0};
+	const int user_buffer_size = sizeof(user_buffer);
+	char input_buffer[100] = {0};
+	const int input_buffer_size = sizeof(input_buffer);
+
 	int force_recompile = 1;
 
 	TCCState *s = 0;
@@ -677,31 +871,14 @@ void run_recompilation_loop()
 	const char* source_buffer_start = source_buffer;
 	const char* source_buffer_end = source_buffer + source_buffer_size;
 
-	int program_buffer_size = 40 * 1024 * 100; // Roughly space for 100 recompiles
-	void* program_buffer = malloc(program_buffer_size);
-	const void* program_buffer_start = program_buffer;
-	const void* program_buffer_end = program_buffer + program_buffer_size;
-	g_program_buffer_start = program_buffer;
-
-	int state_size = input_buffer_size;
-	int state_max_count = 16 * 1024;
-	void* state_buffer = malloc(state_size * state_max_count);
-	const void* state_buffer_start = state_buffer;
-	const void* state_buffer_end = state_buffer + state_size * state_max_count;
-
-	int tick_data_buffer_count = state_max_count;
-	struct Tick_Data* tick_data_buffer = (struct Tick_Data*)malloc(tick_data_buffer_count * sizeof(struct Tick_Data));
-	const struct Tick_Data* tick_data_buffer_start = tick_data_buffer;
-	const struct Tick_Data* tick_data_buffer_end = tick_data_buffer + tick_data_buffer_count;
-	int tick_count = 0;
-
 	HWND hWnd = create_window();
+	const struct Tick_Data* prev_tick_data = 0;
 
 	for (;;)
 	{
-		tick_printf("\rTicks left: %lld, %lld, %lld, %lld ", tick_data_buffer - tick_data_buffer_start, state_buffer - state_buffer_start, program_buffer - program_buffer_start, source_buffer - source_buffer_start);
+		tick_printf("\rTicks left: %lld, %lld, %lld, %lld ", tick_data_buffer_write_head - tick_data_buffer_start, state_buffer_write_head - state_buffer_start, program_buffer_write_head - program_buffer_start, source_buffer - source_buffer_start);
 
-		if (tick_data_buffer >= tick_data_buffer_end)
+		if (tick_data_buffer_write_head >= tick_data_buffer_end)
 		{
 			printf("Out of ticks.");
 			break;
@@ -709,10 +886,10 @@ void run_recompilation_loop()
 
 		struct Tick_Data new_tick;
 
-		if (!g_tick_data)
+		if (!prev_tick_data)
 			memset(&new_tick, 0, sizeof(struct Tick_Data));
 		else
-			memcpy(&new_tick, g_tick_data, sizeof(struct Tick_Data));
+			memcpy(&new_tick, prev_tick_data, sizeof(struct Tick_Data));
 
 		tick_printf("tick(%d,%d,%d,%d), ", new_tick.state_offset, new_tick.update_func_offset, new_tick.paint_func_offset, new_tick.key_down_func_offset, new_tick.source_offset);
 
@@ -813,7 +990,7 @@ void run_recompilation_loop()
 			}
 			else
 			{
-				if (program_size > program_buffer_end - program_buffer)
+				if (program_size > program_buffer_end - program_buffer_write_head)
 				{
 					if (program_size > 1024 * 1024 * 1024)
 					{
@@ -828,7 +1005,7 @@ void run_recompilation_loop()
 
 #ifdef _WIN32
 			DWORD old;
-			if (!VirtualProtect(program_buffer, program_size, PAGE_READWRITE, &old))
+			if (!VirtualProtect(program_buffer_write_head, program_size, PAGE_READWRITE, &old))
 			{
 				fprintf(stderr, "Couldn't unlock page protection. Old protection value: %d", old);
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
@@ -840,7 +1017,7 @@ void run_recompilation_loop()
 
 			printf("Linking...\n");
 			int err = 0;
-			if (0 > (err = tcc_relocate(s, program_buffer)))
+			if (0 > (err = tcc_relocate(s, program_buffer_write_head)))
 			{
 				fprintf(stderr, "Failed to relocate (=link). Err: %d\n", err);
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
@@ -850,24 +1027,24 @@ void run_recompilation_loop()
 			clock_t milliseconds = (clock() - c) * (1000ull / CLOCKS_PER_SEC);
 			printf("Recompilation took %lld.%03lld seconds. Executable size in memory is %lld.%03lld KB\n", milliseconds/1000ull, milliseconds%1000ull, program_size / 1000ull, program_size % 1000ull);
 
-			Update_Func update = tcc_get_symbol(s, "update");
-			if (!update)
+			Update_Func update_func = tcc_get_symbol(s, "update");
+			if (!update_func)
 			{
 				fprintf(stderr, "Failed to load the 'void update(Communication*)' symbol after recompilation.\n");
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
-			Paint_Func paint  = tcc_get_symbol(s, "paint");
-			if (!paint)
+			Paint_Func paint_func  = tcc_get_symbol(s, "paint");
+			if (!paint_func)
 			{
 				fprintf(stderr, "Failed to load the 'paint' symbol after recompilation.\n");
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
 				continue;
 			}
 
-			Key_Down_Func key_down  = tcc_get_symbol(s, "key_down");
-			if (!key_down)
+			Key_Down_Func key_down_func  = tcc_get_symbol(s, "key_down");
+			if (!key_down_func)
 			{
 				fprintf(stderr, "Failed to load the 'key_down' symbol after recompilation.\n");
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
@@ -877,17 +1054,17 @@ void run_recompilation_loop()
 			new_tick.source_offset = src_end - source_buffer;
 			source_buffer = src_end;
 
-			new_tick.update_func_offset = ((char*)update) - program_buffer_start;
-			new_tick.paint_func_offset = ((char*)paint) - program_buffer_start;
-			new_tick.key_down_func_offset = ((char*)key_down) - program_buffer_start;
+			new_tick.update_func_offset = ((char*)update_func) - program_buffer_start;
+			new_tick.paint_func_offset = ((char*)paint_func) - program_buffer_start;
+			new_tick.key_down_func_offset = ((char*)key_down_func) - program_buffer_start;
 			new_tick.skip = 1;
 
-			program_buffer += program_size;
+			program_buffer_write_head += program_size;
 			get_headers_and_sources(b_source_filename, headers_and_sources);
 
-			memcpy(tick_data_buffer, &new_tick, sizeof(struct Tick_Data));
-			g_tick_data = tick_data_buffer;
-			tick_data_buffer += 1;
+			memcpy(tick_data_buffer_write_head, &new_tick, sizeof(struct Tick_Data));
+			prev_tick_data = tick_data_buffer_write_head;
+			tick_data_buffer_write_head += 1;
 
 			force_recompile = 0;
 			was_recompiled = 1;
@@ -895,7 +1072,8 @@ void run_recompilation_loop()
 			continue;
 		}
 
-		poll_input(hWnd, input_buffer);
+		Key_Down_Func key_down_func = (Key_Down_Func)(program_buffer_start + new_tick.key_down_func_offset);
+		int close_requested = poll_input(hWnd, key_down_func, input_buffer);
 
 		Communication communication = {0};
 		communication.time_us = microseconds();
@@ -906,26 +1084,28 @@ void run_recompilation_loop()
 
 		new_tick.time_us = communication.time_us;
 
-		new_tick.state_offset = state_buffer - state_buffer_start;
-		memcpy(state_buffer, input_buffer, input_buffer_size);
-		state_buffer += state_size;
+		new_tick.state_offset = state_buffer_write_head - state_buffer_start;
+		memcpy(state_buffer_write_head, input_buffer, input_buffer_size);
+		state_buffer_write_head += state_stride;
 
 		FATAL(new_tick.update_func_offset > 0, "'update' not loaded.");
-		Update_Func update = (Update_Func)(program_buffer_start + new_tick.update_func_offset);
-		update(&communication);
+		Update_Func update_func = (Update_Func)(program_buffer_start + new_tick.update_func_offset);
+		update_func(&communication);
 
 		if (communication.redraw_requested)
 			RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
 
 		new_tick.redraw_requested = communication.redraw_requested;
-		new_tick.stop = communication.stop || g_stopping || g_window_close_requested;
+
+		Paint_Func paint_func = (Paint_Func)(program_buffer_start + new_tick.paint_func_offset);
+		int stopping = poll_repaint(hWnd, paint_func, user_buffer);
+
+		new_tick.stop = communication.stop || close_requested || stopping;
 		new_tick.skip = 0;
 
-		memcpy(tick_data_buffer, &new_tick, sizeof(struct Tick_Data));
-		g_tick_data = tick_data_buffer;
-		tick_data_buffer += 1;
-
-		poll_repaint(hWnd, user_buffer);
+		memcpy(tick_data_buffer_write_head, &new_tick, sizeof(struct Tick_Data));
+		prev_tick_data = tick_data_buffer_write_head;
+		tick_data_buffer_write_head += 1;
 
 		if (new_tick.stop != 0)
 			break;
@@ -937,49 +1117,30 @@ void run_recompilation_loop()
 	if (s)
 		tcc_delete(s);
 
-	if (!is_window_open(hWnd))
-		hWnd = create_window();
-
-	memset(user_buffer, 0, user_buffer_size);
-	memset(input_buffer, 0, input_buffer_size);
-
-	for(const struct Tick_Data* tick = tick_data_buffer_start; tick <= tick_data_buffer; tick++)
-	{
-		tick_printf("\rTicks left: %lld, ", tick - tick_data_buffer_start);
-		tick_printf("tick(%d,%d,%d,%d), ", tick->state_offset, tick->update_func_offset, tick->paint_func_offset, tick->key_down_func_offset, tick->source_offset);
-
-		if (tick->skip)
-			continue;
-
-		memcpy(input_buffer, state_buffer_start + tick->state_offset, input_buffer_size); 
-
-		Communication communication = {0};
-		communication.time_us = tick->time_us;
-		communication.input_buffer = input_buffer;
-		communication.input_buffer_size = input_buffer_size;
-		communication.user_buffer = user_buffer;
-		communication.user_buffer_size = user_buffer_size;
-
-		Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
-		update(&communication);
-
-		if (tick->redraw_requested)
-			RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
-
-		g_tick_data = tick;
-		poll_repaint(hWnd, user_buffer);
-
-		if (tick->stop)
-			break;
-
-		if (communication.redraw_requested)
-			Sleep(16);
-	}
-
-	Sleep(1000);
-	DestroyWindow(hWnd);
+	if (is_window_open(hWnd))
+		DestroyWindow(hWnd);
 
 	return;
+}
+
+void run()
+{
+	void* malloc(size_t);
+	Execution_Buffers execution_buffers;
+	execution_buffers.program_buffer_size = 40 * 1024 * 100; // Roughly space for 100 recompiles
+	execution_buffers.program_buffer = malloc(execution_buffers.program_buffer_size);
+
+	execution_buffers.state_stride = 100;
+	execution_buffers.state_max_count = 16 * 1024; 
+	execution_buffers.state_buffer = malloc(execution_buffers.state_stride * execution_buffers.state_max_count);
+
+	execution_buffers.tick_max_count = execution_buffers.state_max_count;
+	execution_buffers.tick_data_buffer = (struct Tick_Data*)malloc(execution_buffers.tick_max_count * sizeof(struct Tick_Data));
+
+	run_recompilation_loop(execution_buffers);
+
+	replay(execution_buffers);
+	do_rewind(execution_buffers);
 }
 
 LONG exception_handler(LPEXCEPTION_POINTERS p)
@@ -991,7 +1152,8 @@ LONG exception_handler(LPEXCEPTION_POINTERS p)
 void _start()
 {
 	SetUnhandledExceptionFilter((LPTOP_LEVEL_EXCEPTION_FILTER)&exception_handler);
-	run_recompilation_loop();
+	
+	run();
 }
 
 void _runmain() { _start(); }
@@ -1120,7 +1282,7 @@ void update(Communication* communication)
 	setup(state, input);
 
 	state->tick += 1;
-	if (state->tick % 100 == 0)
+	if (state->tick % 100 == 0 && !communication->ghost_frame)
 		printf("update(%5d)\n", state->tick);
 
 	tick(state, input, communication->time_us);
