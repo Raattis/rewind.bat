@@ -14,7 +14,7 @@ fi # sh_bootstrap_builder
 # Did you know that hashbang doesn't have to be on the first line of a file? Wild, right!
 #!/usr/bin/env sh
 
-compiler_executable=tcc
+compiler_executable=gcc
 me=`basename "$0"`
 no_ext=`echo "$me" | cut -d'.' -f1`
 executable="${no_ext}.exe"
