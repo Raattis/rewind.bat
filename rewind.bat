@@ -1123,24 +1123,151 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 	return;
 }
 
-void run()
+Execution_Buffers create_execution_buffers()
 {
-	void* malloc(size_t);
 	Execution_Buffers execution_buffers;
 	execution_buffers.program_buffer_size = 40 * 1024 * 100; // Roughly space for 100 recompiles
-	execution_buffers.program_buffer = malloc(execution_buffers.program_buffer_size);
-
 	execution_buffers.state_stride = 100;
 	execution_buffers.state_max_count = 16 * 1024; 
-	execution_buffers.state_buffer = malloc(execution_buffers.state_stride * execution_buffers.state_max_count);
-
 	execution_buffers.tick_max_count = execution_buffers.state_max_count;
-	execution_buffers.tick_data_buffer = (struct Tick_Data*)malloc(execution_buffers.tick_max_count * sizeof(struct Tick_Data));
 
-	run_recompilation_loop(execution_buffers);
+	void* malloc(size_t);
+	execution_buffers.program_buffer = malloc(execution_buffers.program_buffer_size);
+	execution_buffers.state_buffer = malloc(execution_buffers.state_stride * execution_buffers.state_max_count);
+	execution_buffers.tick_data_buffer = malloc(execution_buffers.tick_max_count * sizeof(struct Tick_Data));
 
-	replay(execution_buffers);
-	do_rewind(execution_buffers);
+	return execution_buffers;
+}
+
+void store_execution_buffers(Execution_Buffers execution_buffers, void* save_buffer)
+{
+	void* save_head = save_buffer;
+
+	Execution_Buffers execution_buffers_copy = execution_buffers;
+	execution_buffers_copy.program_buffer = 0;
+	execution_buffers_copy.state_buffer = 0;
+	execution_buffers_copy.tick_data_buffer = 0;
+	memcpy(save_head, &execution_buffers, sizeof(execution_buffers_copy)); save_head += sizeof(execution_buffers);
+	memcpy(save_head, execution_buffers.program_buffer, execution_buffers.program_buffer_size); save_head += execution_buffers.program_buffer_size;
+	memcpy(save_head, execution_buffers.state_buffer, execution_buffers.state_stride * execution_buffers.state_max_count); save_head += execution_buffers.state_stride * execution_buffers.state_max_count;
+	memcpy(save_head, execution_buffers.tick_data_buffer, sizeof(struct Tick_Data) * execution_buffers.tick_max_count); save_head += sizeof(struct Tick_Data) * execution_buffers.tick_max_count;
+}
+
+size_t get_execution_buffers_save_size(Execution_Buffers execution_buffers)
+{
+	size_t save_size
+		= sizeof(execution_buffers)
+		+ execution_buffers.program_buffer_size
+		+ execution_buffers.state_stride * execution_buffers.state_max_count
+		+ sizeof(struct Tick_Data) * execution_buffers.tick_max_count;
+
+	trace_printf("get_execution_buffers_size: %lld\n", save_size);
+
+	return save_size;
+}
+
+//size_t get_saved_execution_buffers_size(const void* save_buffer)
+//{
+//	Execution_Buffers execution_buffers = {0};
+//	memcpy(&execution_buffers, save_buffer, sizeof(execution_buffers));
+//	return get_execution_buffers_size(execution_buffers);
+//}
+
+Execution_Buffers load_execution_buffers(void* save_buffer)
+{
+	Execution_Buffers execution_buffers = {0};
+	
+	void* save_head = save_buffer;
+
+	memcpy(&execution_buffers, save_head, sizeof(execution_buffers)); save_head += sizeof(execution_buffers);
+	execution_buffers.program_buffer = save_head; save_head += execution_buffers.program_buffer_size;
+	execution_buffers.state_buffer = save_head; save_head += execution_buffers.state_stride * execution_buffers.state_max_count;
+	execution_buffers.tick_data_buffer = save_head; save_head += sizeof(struct Tick_Data) * execution_buffers.tick_max_count;
+
+	void* program_buffer = malloc(execution_buffers.program_buffer_size);
+	memcpy(program_buffer, execution_buffers.program_buffer, execution_buffers.program_buffer_size);
+	execution_buffers.program_buffer = program_buffer;
+	
+	DWORD old;
+	if (!VirtualProtect(execution_buffers.program_buffer, execution_buffers.program_buffer_size, PAGE_EXECUTE, &old))
+	{
+		FATAL(0, "Couldn't change page protection. Old protection value: %d, new %d, err:0x%llX, size: 0x%llX", old, PAGE_EXECUTE, GetLastError(), execution_buffers.program_buffer_size);
+	}
+
+	printf("load_execution_buffers: %lld\n", save_head - save_buffer);
+	printf("program_buffer: 0x%llX\n", execution_buffers.program_buffer);
+
+	return execution_buffers;
+}
+
+void release_loaded_execution_buffers(Execution_Buffers execution_buffers)
+{
+	void* file_mapping = execution_buffers.state_buffer - execution_buffers.program_buffer_size - sizeof(execution_buffers);
+
+	printf("UnmapViewOfFile: 0x%llX\n", file_mapping);
+	UnmapViewOfFile(file_mapping);
+
+	DWORD old;
+	if (!VirtualProtect(execution_buffers.program_buffer,  execution_buffers.program_buffer_size, PAGE_READWRITE, &old))
+	{
+		FATAL(0, "Couldn't change page protection. Old protection value: %d", old);
+	}
+	
+	printf("free: 0x%llX\n", execution_buffers.program_buffer);
+	free(execution_buffers.program_buffer);
+	
+	printf("Released!\n");
+}
+
+void run()
+{
+	void* save_buffer = 0;
+	
+	{
+		Execution_Buffers execution_buffers = create_execution_buffers();
+
+		//run_recompilation_loop(execution_buffers);
+
+		size_t save_size = get_execution_buffers_save_size(execution_buffers);
+	
+		HANDLE file_handle = CreateFile("./map_file_test.bin", GENERIC_READ|GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+		if (file_handle == INVALID_HANDLE_VALUE)
+			file_handle = CreateFile("./map_file_test.bin", GENERIC_READ|GENERIC_WRITE, 0, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
+		FATAL(file_handle != INVALID_HANDLE_VALUE, "Couldn't open save file: 0x%X", GetLastError());
+
+		HANDLE map_file_handle = CreateFileMapping(file_handle, 0, PAGE_READWRITE, 0, save_size, 0);
+		FATAL(map_file_handle != INVALID_HANDLE_VALUE, "Couldn't create a map file: 0x%X", GetLastError());
+
+		save_buffer = MapViewOfFile(map_file_handle, FILE_MAP_ALL_ACCESS, 0,0,0);
+		FATAL(save_buffer, "Couldn't map a file to memory: 0x%X", GetLastError());
+		
+		printf("\n");
+		for (int i = 0; i < sizeof(Execution_Buffers); ++i)
+			printf("%hhX ", ((char*)save_buffer)[i]);
+		printf("\n");
+	
+		CloseHandle(map_file_handle);
+		CloseHandle(file_handle);
+
+		//store_execution_buffers(execution_buffers, save_buffer);
+		
+		
+		printf("\n");
+		for (int i = 0; i < sizeof(Execution_Buffers); ++i)
+			printf("%hhX ", ((char*)save_buffer)[i]);
+		printf("\n");
+		
+		//Execution_Buffers loaded_execution_buffers = load_execution_buffers(save_buffer);
+		//release_loaded_execution_buffers(loaded_execution_buffers);
+	}
+
+	Execution_Buffers loaded_execution_buffers = load_execution_buffers(save_buffer);
+
+	replay(loaded_execution_buffers);
+	do_rewind(loaded_execution_buffers);
+
+	printf("save_buffer: 0x%llX\n", save_buffer);
+	release_loaded_execution_buffers(loaded_execution_buffers);
 }
 
 LONG exception_handler(LPEXCEPTION_POINTERS p)
