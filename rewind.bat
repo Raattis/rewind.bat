@@ -87,12 +87,27 @@ if not exist %compiler_executable% (
 ) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
 @rem ) | %compiler_executable% -o %~n0.exe  -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
 
+echo.
+
 if %errorlevel% == 0 (
-	echo Run finished without errors!
+	echo Finished without errors!
 ) else (
-	echo Run finished with return value %errorlevel%
+	if %errorlevel% == -1073740940 (
+		echo %errorlevel% - Critical error detected C0000374
+	) else (
+		if %errorlevel% == -1073741819 (
+			echo %errorlevel% - Access right violation C0000005
+		) else (
+			if %errorlevel% == -1073740771 (
+				echo %errorlevel% - STATUS_FATAL_USER_CALLBACK_EXCEPTION C000041D
+			) else (
+				echo Finished with error %errorlevel%
+			)
+		)
+	)
 )
 
+:end
 exit errorlevel
 
 */
@@ -116,9 +131,17 @@ int main()
 
 #ifdef SHARED_PREFIX
 
-enum { TRACE=1 };
+enum { TRACE=1, TRACE_VERBOSE=0 };
+
 #define trace_printf(...) do { if (TRACE) printf(__VA_ARGS__); } while(0)
-#define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); int system(const char*); system("pause"); void exit(int); exit(1); } while(0)
+#define trace_func() trace_printf("%s, ", __FUNCTION__)
+#define trace_func_end() trace_printf("%s end, ", __FUNCTION__)
+
+#define verbose_printf(...) do { if (TRACE_VERBOSE) printf(__VA_ARGS__); } while(0)
+#define verbose_func() verbose_printf("%s, ", __FUNCTION__)
+#define verbose_func_end() verbose_printf("%s end, ", __FUNCTION__)
+
+#define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); int system(const char*); system("pause"); void exit(int); exit(-54746); } while(0)
 
 typedef struct
 {
@@ -132,6 +155,16 @@ typedef struct
 	unsigned long long user_buffer_size;
 	char* user_buffer;
 } Communication;
+
+typedef struct
+{
+	void (*get_screen_width_and_height)(void* drawer, int* screen_width, int* screen_height);
+	void (*rect)(void* drawer, int x, int y, int w, int h, int r, int g, int b);
+	void (*text)(void* drawer, int x, int y, char* str, int strLen);
+	void (*fill)(void* drawer, int r, int g, int b);
+	void (*pixel)(void* drawer, int x, int y, int r, int g, int b);
+	void (*text_w)(void* drawer, int x, int y, unsigned short* str, int strLen);
+} Drawer_Funcs;
 
 #endif // SHARED_PREFIX
 
@@ -150,7 +183,7 @@ typedef struct
 
 #include "wm_message_to_string.h"
 
-enum { TRACE_INPUT=1&&TRACE, TRACE_TICKS=1&&TRACE };
+enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=0&&TRACE };
 
 #define input_printf(...) do { if (TRACE_INPUT) printf(__VA_ARGS__); } while(0)
 #define tick_printf(...) do { if (TRACE_TICKS) printf(__VA_ARGS__); } while(0)
@@ -382,7 +415,7 @@ void open_drawer(HWND hWnd, Drawer* drawer)
 void close_drawer(HWND hWnd, Drawer* drawer)
 {
 	input_printf("close_drawer, ");
-	
+
 	BitBlt(drawer->screen_device_context, 0, 0, drawer->screen_width, drawer->screen_height, drawer->hdc, 0, 0, SRCCOPY);
 
 	SelectObject(drawer->hdc, drawer->previous_gdi_object);
@@ -390,13 +423,13 @@ void close_drawer(HWND hWnd, Drawer* drawer)
 	DeleteDC(drawer->hdc);
 	ReleaseDC(hWnd, drawer->screen_device_context);
 	EndPaint(hWnd, &drawer->ps);
-	
+
 	input_printf("closed, ");
 }
 
 typedef int (*Key_Down_Func)(Communication* communication, int vk_key_code);
 typedef void (*Update_Func)(Communication* communication);
-typedef void (*Paint_Func)(Communication* communication, Drawer* drawer);
+typedef void (*Paint_Func)(Communication* communication, Drawer_Funcs drawer_funcs, Drawer* drawer);
 
 typedef LRESULT (*Window_Message_Handler_Func)(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 struct Tick_Data
@@ -429,7 +462,7 @@ typedef struct
 
 void print_bytes(const char* label, void* bytes, size_t length)
 {
-	if (!TRACE)
+	if (!TRACE_VERBOSE)
 		return;
 
 	printf("\n%s [0x%llX..0x%llX]:\n", label, bytes, bytes + length);
@@ -440,6 +473,66 @@ void print_bytes(const char* label, void* bytes, size_t length)
 			printf("\n");
 	}
 	printf("\n");
+}
+
+void rect(Drawer* drawer, int x, int y, int w, int h, int r, int g, int b)
+{
+	verbose_func();
+
+	RECT rect = {x, y, x+w, y+h};
+	HBRUSH brush = CreateSolidBrush(RGB(r,g,b));
+	int success = FillRect(drawer->hdc, &rect, brush);
+	if (success < 0)
+		fprintf(stderr, "Failed to draw a rectangle. (%d, %d, %d, %d)", x,y, w,h);
+	DeleteObject(brush);
+	
+	verbose_func_end();
+}
+
+void text(Drawer* drawer, int x, int y, char* str, int strLen)
+{
+	verbose_func();
+
+	RECT rect = {x, y, x, y};
+	DrawTextExA(drawer->hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
+}
+
+void get_screen_width_and_height(Drawer* drawer, int* screen_width, int* screen_height)
+{
+	verbose_func();
+
+	FATAL(screen_height || screen_width, "Don't call this for no reason...");
+
+	if (screen_height) *screen_height = drawer->screen_height;
+	if (screen_width) *screen_width = drawer->screen_width;
+
+	verbose_func_end();
+}
+
+void pixel(Drawer* drawer, int x, int y, int r, int g, int b)
+{
+	verbose_func();
+
+	int success = SetPixel(drawer->hdc, x, y, RGB(r, g, b));
+	//if (success < 0)
+	//	fprintf(stderr, "Failed to set pixel to color. (%d, %d) -> (%d,%d,%d)", x,y, r,g,b);
+}
+
+void fill(Drawer* drawer, int r, int g, int b)
+{
+	verbose_func();
+
+	int w = drawer->screen_width;
+	int h = drawer->screen_height; //GetDeviceCaps(drawer->hdc, VERTRES);
+	rect(drawer, 0,0, w,h, r,g,b);
+}
+
+void text_w(Drawer* drawer, int x, int y, wchar_t* str, int strLen)
+{
+	verbose_func();
+
+	RECT rect = {x, y, x, y};
+	DrawTextExW(drawer->hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
 }
 
 LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -469,11 +562,20 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 			Communication communication = {0};
 			communication.user_buffer = message_handling_data->user_buffer;
 
+			Drawer_Funcs drawer_funcs = {
+				.get_screen_width_and_height = &get_screen_width_and_height,
+				.rect = &rect,
+				.text = &text,
+				.fill = &fill,
+				.pixel = &pixel,
+				.text_w = &text_w,
+			};
+
 			Drawer drawer;
 			open_drawer(hWnd, &drawer);
 
 			print_bytes("paint_func", message_handling_data->paint_func, 80);
-			message_handling_data->paint_func(&communication, &drawer);
+			message_handling_data->paint_func(&communication, drawer_funcs, &drawer);
 
 			close_drawer(hWnd, &drawer);
 			return 1;
@@ -513,11 +615,13 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 			break;
 		case WM_DESTROY:
 		{
-			printf("WM_DESTROY\n");
+			trace_printf("WM_DESTROY, ");
 
 			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
 			if (message_handling_data)
 				message_handling_data->stopping = 1;
+
+			trace_printf("WM_DESTROY end\n");
 			// fallthrough
 		}
 		default:
@@ -631,50 +735,6 @@ int poll_input(HWND hWnd, Key_Down_Func key_down_func, void* input_buffer)
 		input_printf("} ");
 
 	return message_handling_data.window_close_requested;
-}
-
-void rect(Drawer* drawer, int x, int y, int w, int h, int r, int g, int b)
-{
-	RECT rect = {x, y, x+w, y+h};
-	HBRUSH brush = CreateSolidBrush(RGB(r,g,b));
-	int success = FillRect(drawer->hdc, &rect, brush);
-	if (success < 0)
-		fprintf(stderr, "Failed to draw a rectangle. (%d, %d, %d, %d)", x,y, w,h);
-	DeleteObject(brush);
-}
-
-void text(Drawer* drawer, int x, int y, char* str, int strLen)
-{
-	RECT rect = {x, y, x, y};
-	DrawTextExA(drawer->hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
-}
-
-void get_screen_width_and_height(Drawer* drawer, int* screen_width, int* screen_height)
-{
-	FATAL(screen_height || screen_width, "Don't call this for no reason...");
-
-	if (screen_height) *screen_height = drawer->screen_height;
-	if (screen_width) *screen_width = drawer->screen_width;
-}
-
-void pixel(Drawer* drawer, int x, int y, int r, int g, int b)
-{
-	int success = SetPixel(drawer->hdc, x, y, RGB(r, g, b));
-	//if (success < 0)
-	//	fprintf(stderr, "Failed to set pixel to color. (%d, %d) -> (%d,%d,%d)", x,y, r,g,b);
-}
-
-void fill(Drawer* drawer, int r, int g, int b)
-{
-	int w = drawer->screen_width;
-	int h = drawer->screen_height; //GetDeviceCaps(drawer->hdc, VERTRES);
-	rect(drawer, 0,0, w,h, r,g,b);
-}
-
-void text_w(Drawer* drawer, int x, int y, wchar_t* str, int strLen)
-{
-	RECT rect = {x, y, x, y};
-	DrawTextExW(drawer->hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
 }
 
 int is_window_open(HWND hWnd)
@@ -946,7 +1006,7 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 				, b_source_filename);
 
 			char* src_end = 0;
-			printf("Copying source\n");
+			trace_printf("Copying source to [0x%llX] space left %lld, ", source_buffer + prefix_length, source_buffer_end - source_buffer + prefix_length);
 			{
 				char* src = source_buffer + prefix_length;
 				int size_left = source_buffer_end - src;
@@ -958,7 +1018,11 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 					wait_for_change(&newest_file_timestamp, headers_and_sources);
 					continue;
 				}
+
+				trace_printf("opened %s for reading, ", b_source_filename);
 				size_t read_length = fread(src, sizeof(char), size_left, src_file);
+
+				trace_printf("read %d bytes, ", read_length);
 				fclose(src_file);
 
 				FATAL(read_length + 1 < size_left, "%s is too big (%d B < %d B) to runtime compile.", b_source_filename, read_length, size_left);
@@ -966,17 +1030,23 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 				src[read_length] = 0;
 				src_end = src + read_length + 1;
 			}
+			printf("\n");
 
 			new_tick.paint_func_offset = -1;
 			new_tick.key_down_func_offset = -1;
 
 			if (s)
+			{
+				trace_printf("tcc_delete, ");
 				tcc_delete(s);
+			}
 
+			trace_printf("tcc_new, ");
 			s = tcc_new();
 			FATAL(s, "Could not create tcc state\n");
+			trace_printf("\n");
 
-			trace_printf("tcc_set_output_type  \n");
+			trace_printf("tcc_set_output_type\n");
 			tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
 
 			trace_printf("tcc_set_options \n");
@@ -992,27 +1062,27 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 
 			trace_printf("tcc_add_library_err: ");
 			extern int tcc_add_library_err(TCCState *s, const char *f);
-			
-			tcc_add_library_err(s, "gdi32");
-			
+
+			//tcc_add_library_err(s, "gdi32");
+
 			trace_printf("msvcrt, ");
 			tcc_add_library_err(s, "msvcrt");
-			
+
 			trace_printf("kernel32, ");
 			tcc_add_library_err(s, "kernel32");
-			
+
 			trace_printf("user32 .. ");
 			tcc_add_library_err(s, "user32");
 			trace_printf("done!\n");
 
 			trace_printf("tcc_add_symbol \n");
 			//tcc_add_symbol(s, "get_window_message_handler", get_window_message_handler);
-			tcc_add_symbol(s, "get_screen_width_and_height", get_screen_width_and_height);
-			tcc_add_symbol(s, "rect", rect);
-			tcc_add_symbol(s, "text", text);
-			tcc_add_symbol(s, "fill", fill);
-			tcc_add_symbol(s, "pixel", pixel);
-			tcc_add_symbol(s, "text_w", text_w);
+			//tcc_add_symbol(s, "get_screen_width_and_height", get_screen_width_and_height);
+			//tcc_add_symbol(s, "rect", rect);
+			//tcc_add_symbol(s, "text", text);
+			//tcc_add_symbol(s, "fill", fill);
+			//tcc_add_symbol(s, "pixel", pixel);
+			//tcc_add_symbol(s, "text_w", text_w);
 
 			trace_printf("Compiling\n");
 			if (-1 == tcc_compile_string(s, source_buffer))
@@ -1188,7 +1258,7 @@ Execution_Buffers create_execution_buffers()
 	execution_buffers.state_stride = 100;
 	execution_buffers.state_max_count = 16 * 1024; 
 	execution_buffers.tick_max_count = execution_buffers.state_max_count;
-	
+
 	void* malloc(size_t);
 	execution_buffers.program_buffer = malloc(execution_buffers.program_buffer_size);
 	execution_buffers.state_buffer = malloc(execution_buffers.state_stride * execution_buffers.state_max_count);
@@ -1199,13 +1269,13 @@ Execution_Buffers create_execution_buffers()
 
 void store_execution_buffers(Execution_Buffers execution_buffers, FILE* save_file)
 {
-	trace_printf("store_execution_buffers, ");
-	
+	trace_func();
+
 	Execution_Buffers execution_buffers_copy = execution_buffers;
 	execution_buffers_copy.program_buffer = 0;
 	execution_buffers_copy.state_buffer = 0;
 	execution_buffers_copy.tick_data_buffer = 0;
-	
+
 	fwrite(&execution_buffers_copy, sizeof(execution_buffers_copy), 1, save_file);
 	fwrite(execution_buffers.program_buffer, execution_buffers.program_buffer_size, 1, save_file);
 	fwrite(execution_buffers.state_buffer, execution_buffers.state_stride, execution_buffers.state_max_count, save_file);
@@ -1218,7 +1288,7 @@ void store_execution_buffers(Execution_Buffers execution_buffers, FILE* save_fil
 
 Execution_Buffers load_execution_buffers(FILE* save_file)
 {
-	trace_printf("load_execution_buffers, ");
+	trace_func();
 
 	Execution_Buffers execution_buffers = {0};
 
@@ -1236,27 +1306,34 @@ Execution_Buffers load_execution_buffers(FILE* save_file)
 	print_bytes("state_buffer", execution_buffers.state_buffer, 80);
 	print_bytes("tick_data_buffer", execution_buffers.tick_data_buffer, 80);
 
-	//DWORD old;
-	//if (!VirtualProtect(execution_buffers.program_buffer, execution_buffers.program_buffer_size, PAGE_EXECUTE, &old))
-	//{
-	//	FATAL(0, "Couldn't change page protection. Old protection value: %d, new %d, err:0x%llX, size: 0x%llX", old, PAGE_EXECUTE, GetLastError(), execution_buffers.program_buffer_size);
-	//}
+	DWORD old;
+	if (!VirtualProtect(execution_buffers.program_buffer, execution_buffers.program_buffer_size, PAGE_EXECUTE, &old))
+	{
+		FATAL(0, "Couldn't change page protection. Old protection value: %d, new %d, err:0x%llX, size: 0x%llX", old, PAGE_EXECUTE, GetLastError(), execution_buffers.program_buffer_size);
+	}
+
+	trace_func_end();
 
 	return execution_buffers;
 }
 
 void release_loaded_execution_buffers(Execution_Buffers execution_buffers)
 {
-	trace_printf("release_loaded_execution_buffers, ");
+	trace_printf("release_loaded_execution_buffers, unlocking program buffer, ");
 
-	//DWORD old;
-	//if (!VirtualProtect(execution_buffers.program_buffer,  execution_buffers.program_buffer_size, PAGE_READWRITE, &old))
-	//{
-	//	FATAL(0, "Couldn't change page protection. Old protection value: %d", old);
-	//}
+	DWORD old;
+	if (!VirtualProtect(execution_buffers.program_buffer,  execution_buffers.program_buffer_size, PAGE_READWRITE, &old))
+	{
+		FATAL(0, "Couldn't change page protection. Old protection value: %d", old);
+	}
 
+	trace_printf("freeing program buffer, ");
 	free(execution_buffers.program_buffer);
+
+	trace_printf("freeing state buffer, ");
 	free(execution_buffers.state_buffer);
+
+	trace_printf("freeing tick data buffer, ");
 	free(execution_buffers.tick_data_buffer);
 
 	printf("Released!\n");
@@ -1265,7 +1342,7 @@ void release_loaded_execution_buffers(Execution_Buffers execution_buffers)
 void run()
 {
 	enum { DO_PLAY=1, DO_REPLAY=1,  };
-	
+
 	if (DO_PLAY)
 	{
 		Execution_Buffers execution_buffers = create_execution_buffers();
@@ -1274,7 +1351,7 @@ void run()
 		trace_printf("run_recompilation_loop end\n");
 
 		size_t save_size = get_execution_buffers_save_size(execution_buffers);
-	
+
 		FILE* file = fopen("./map_file_test.bin", "wb");
 		FATAL(file, "Couldn't open file for writing. Err: 0x%X", GetLastError());
 
@@ -1294,6 +1371,8 @@ void run()
 
 		release_loaded_execution_buffers(loaded_execution_buffers);
 	}
+
+	verbose_func_end();
 }
 
 LONG exception_handler(LPEXCEPTION_POINTERS p)
@@ -1305,10 +1384,14 @@ LONG exception_handler(LPEXCEPTION_POINTERS p)
 void _start()
 {
 	trace_printf("_start()\n");
-	
+
 	SetUnhandledExceptionFilter((LPTOP_LEVEL_EXCEPTION_FILTER)&exception_handler);
-	
+
 	run();
+
+	trace_printf("\nBye!\n");
+
+	exit(0);
 }
 
 void _runmain() { _start(); }
@@ -1324,11 +1407,11 @@ void _runmain() { _start(); }
 #include <windows.h>
 #include <time.h>
 
-#include "tetris.h"
-
-enum { TRACE_PAINT=1&&TRACE };
+enum { TRACE_PAINT=0&&TRACE };
 
 #define paint_printf(...) do { if (TRACE_PAINT) printf(__VA_ARGS__); } while(0)
+
+#include "tetris.h"
 
 typedef struct
 {
@@ -1349,35 +1432,30 @@ typedef struct
 
 enum { StateInitializedMagicNumber = 123456 };
 
-typedef void Drawer;
-
-extern void fill(Drawer* drawer, int r, int g, int b);
-extern void pixel(Drawer* drawer, int x, int y, int r, int g, int b);
-extern void text_w(Drawer* drawer, int x, int y, wchar_t* str, int strLen);
-
-void paint(Communication* communication, Drawer* drawer)
+void paint(Communication* communication, Drawer_Funcs drawer_funcs, void* drawer)
 {
-	paint_printf("paint, ");
-	
-	fill(drawer, 255, 255, 255);
-	rect(drawer, 20, 20, 200, 200, 255, 255, 0);
+	verbose_func();
+
+	drawer_funcs.fill(drawer, 255, 255, 255);
+
+	drawer_funcs.rect(drawer, 20, 20, 200, 200, 255, 255, 0);
 
 	State* state = (State*)communication->user_buffer;
 	if (state)
 	{
 		for (int x = state->x - 50; x < state->x + 50; ++x)
-			pixel(drawer, x, state->y, 255, 0, 0);
+			drawer_funcs.pixel(drawer, x, state->y, 255, 0, 0);
 
-		rect(drawer, state->x, state->y - 50, 1, 100, 0, 0, 255);
+		drawer_funcs.rect(drawer, state->x, state->y - 50, 1, 100, 0, 0, 255);
 	}
 
-	text(drawer, 30, 30, "Hello, World!", -1);
-	text_w(drawer, 30, 60, L"Hëllö, Wärld!", -1);
+	drawer_funcs.text(drawer, 30, 30, "Hello, World!", -1);
+	drawer_funcs.text_w(drawer, 30, 60, L"Hëllö, Wärld!", -1);
 
 	if (state)
-		tetris_draw(drawer, &state->tetris);
+		tetris_draw(drawer_funcs, drawer, &state->tetris);
 
-	paint_printf("paint end, ");
+	verbose_func_end();
 }
 
 int key_down(Communication* communication, int vk_key_code)
@@ -1406,7 +1484,7 @@ int key_down(Communication* communication, int vk_key_code)
 			input->tetris_input.input_drop = 1;
 			return 0;
 	}
-	
+
 	return 1;
 }
 
@@ -1420,7 +1498,7 @@ static void setup(State* state, Input* input)
 	memset(input, 0, sizeof(*input));
 
 	trace_printf("Initializing state (0x%llX)...\n", (void*)state);
-	
+
 	state->initialized = StateInitializedMagicNumber;
 	state->tick = 0;
 	state->x = 200;
