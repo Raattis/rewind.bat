@@ -116,7 +116,7 @@ int main()
 
 #ifdef SHARED_PREFIX
 
-enum { TRACE=0 };
+enum { TRACE=1 };
 #define trace_printf(...) do { if (TRACE) printf(__VA_ARGS__); } while(0)
 #define FATAL(x, ...) do { if (x) break; fprintf(stderr, "%s:%d: (" SEGMENT_NAME "/%s) FATAL: ", __FILE__, __LINE__, __FUNCTION__); fprintf(stderr, __VA_ARGS__ ); fprintf(stderr, "\n(%s)\n", #x); int system(const char*); system("pause"); void exit(int); exit(1); } while(0)
 
@@ -150,7 +150,7 @@ typedef struct
 
 #include "wm_message_to_string.h"
 
-enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=1&&TRACE };
+enum { TRACE_INPUT=1&&TRACE, TRACE_TICKS=1&&TRACE };
 
 #define input_printf(...) do { if (TRACE_INPUT) printf(__VA_ARGS__); } while(0)
 #define tick_printf(...) do { if (TRACE_TICKS) printf(__VA_ARGS__); } while(0)
@@ -364,6 +364,8 @@ typedef struct
 
 void open_drawer(HWND hWnd, Drawer* drawer)
 {
+	input_printf("open_drawer, ");
+
 	RECT screen_rect;
 	GetClientRect(hWnd, &screen_rect);
 	drawer->screen_width = screen_rect.right;
@@ -373,10 +375,14 @@ void open_drawer(HWND hWnd, Drawer* drawer)
 	drawer->hdc = CreateCompatibleDC(drawer->screen_device_context);
 	drawer->bitmap = CreateCompatibleBitmap(drawer->screen_device_context, drawer->screen_width, drawer->screen_height);
 	drawer->previous_gdi_object = SelectObject(drawer->hdc, drawer->bitmap);
+
+	input_printf("opened, ");
 }
 
 void close_drawer(HWND hWnd, Drawer* drawer)
 {
+	input_printf("close_drawer, ");
+	
 	BitBlt(drawer->screen_device_context, 0, 0, drawer->screen_width, drawer->screen_height, drawer->hdc, 0, 0, SRCCOPY);
 
 	SelectObject(drawer->hdc, drawer->previous_gdi_object);
@@ -384,6 +390,8 @@ void close_drawer(HWND hWnd, Drawer* drawer)
 	DeleteDC(drawer->hdc);
 	ReleaseDC(hWnd, drawer->screen_device_context);
 	EndPaint(hWnd, &drawer->ps);
+	
+	input_printf("closed, ");
 }
 
 typedef int (*Key_Down_Func)(Communication* communication, int vk_key_code);
@@ -406,6 +414,8 @@ struct Tick_Data
 	int stop;
 };
 
+void* g_debug_program_buffer;
+
 typedef struct
 {
 	int window_close_requested;
@@ -416,6 +426,21 @@ typedef struct
 	Paint_Func paint_func;
 	Key_Down_Func key_down_func;
 } MessageHandlingData;
+
+void print_bytes(const char* label, void* bytes, size_t length)
+{
+	if (!TRACE)
+		return;
+
+	printf("\n%s [0x%llX..0x%llX]:\n", label, bytes, bytes + length);
+	for (int i = 0; i < length; ++i)
+	{
+		printf("%02X ", ((unsigned char*)bytes)[i]);
+		if (((i + 1) % 32) == 0)
+			printf("\n");
+	}
+	printf("\n");
+}
 
 LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
@@ -447,6 +472,7 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 			Drawer drawer;
 			open_drawer(hWnd, &drawer);
 
+			print_bytes("paint_func", message_handling_data->paint_func, 80);
 			message_handling_data->paint_func(&communication, &drawer);
 
 			close_drawer(hWnd, &drawer);
@@ -568,6 +594,9 @@ int poll_repaint(HWND hWnd, Paint_Func paint_func, void* user_buffer)
 		input_printf("\n}\n");
 	else
 		input_printf("} ");
+
+	if (message_handling_data.stopping)
+		printf("message_handling_data.stopping\n");
 
 	return message_handling_data.stopping;
 }
@@ -716,6 +745,7 @@ void paint_tick(HWND hWnd, void* user_buffer, const struct Tick_Data* tick, cons
 	if (tick->redraw_requested)
 		RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
 
+	g_debug_program_buffer = program_buffer_start;
 	Paint_Func paint_func = (void*)program_buffer_start + tick->paint_func_offset;
 	poll_repaint(hWnd, paint_func, user_buffer);
 }
@@ -752,6 +782,8 @@ typedef struct
 
 void replay(Execution_Buffers execution_buffers)
 {
+	trace_printf("replay, ");
+
 	const struct Tick_Data* tick_data_buffer_start = execution_buffers.tick_data_buffer;
 	const void* state_buffer_start = execution_buffers.state_buffer;
 	const void* program_buffer_start = execution_buffers.program_buffer;
@@ -781,6 +813,8 @@ void replay(Execution_Buffers execution_buffers)
 
 void do_rewind(Execution_Buffers execution_buffers)
 {
+	trace_printf("do_rewind, ");
+
 	const struct Tick_Data* tick_data_buffer_start = execution_buffers.tick_data_buffer;
 	const void* state_buffer_start = execution_buffers.state_buffer;
 	const void* program_buffer_start = execution_buffers.program_buffer;
@@ -956,12 +990,20 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 			trace_printf("tcc_add_library_path  \n");
 			tcc_add_library_path(s, "tcc/lib");
 
-			trace_printf("tcc_add_library_err  \n");
+			trace_printf("tcc_add_library_err: ");
 			extern int tcc_add_library_err(TCCState *s, const char *f);
-			//tcc_add_library_err(s, "gdi32");
+			
+			tcc_add_library_err(s, "gdi32");
+			
+			trace_printf("msvcrt, ");
 			tcc_add_library_err(s, "msvcrt");
+			
+			trace_printf("kernel32, ");
 			tcc_add_library_err(s, "kernel32");
+			
+			trace_printf("user32 .. ");
 			tcc_add_library_err(s, "user32");
+			trace_printf("done!\n");
 
 			trace_printf("tcc_add_symbol \n");
 			//tcc_add_symbol(s, "get_window_message_handler", get_window_message_handler);
@@ -980,8 +1022,9 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 				continue;
 			}
 
-			trace_printf("Checking resulting size...\n");
+			trace_printf("Checking resulting size: ");
 			int program_size = tcc_relocate(s, 0);
+			trace_printf("%d\n", program_size);
 			if (program_size < 0)
 			{
 				fprintf(stderr, "Failed get size for relocate (=linking). Err: %d\n", program_size);
@@ -1123,14 +1166,29 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 	return;
 }
 
+size_t get_execution_buffers_save_size(Execution_Buffers execution_buffers)
+{
+	trace_printf("get_execution_buffers_size, ");
+
+	size_t save_size
+		= sizeof(execution_buffers)
+		+ execution_buffers.program_buffer_size
+		+ execution_buffers.state_stride * execution_buffers.state_max_count
+		+ sizeof(struct Tick_Data) * execution_buffers.tick_max_count;
+
+	trace_printf("%lld, ", save_size);
+
+	return save_size;
+}
+
 Execution_Buffers create_execution_buffers()
 {
 	Execution_Buffers execution_buffers;
-	execution_buffers.program_buffer_size = 40 * 1024 * 100; // Roughly space for 100 recompiles
+	execution_buffers.program_buffer_size = 4 * 1024 * 1024; // Roughly space for 100 recompiles
 	execution_buffers.state_stride = 100;
 	execution_buffers.state_max_count = 16 * 1024; 
 	execution_buffers.tick_max_count = execution_buffers.state_max_count;
-
+	
 	void* malloc(size_t);
 	execution_buffers.program_buffer = malloc(execution_buffers.program_buffer_size);
 	execution_buffers.state_buffer = malloc(execution_buffers.state_stride * execution_buffers.state_max_count);
@@ -1139,135 +1197,103 @@ Execution_Buffers create_execution_buffers()
 	return execution_buffers;
 }
 
-void store_execution_buffers(Execution_Buffers execution_buffers, void* save_buffer)
+void store_execution_buffers(Execution_Buffers execution_buffers, FILE* save_file)
 {
-	void* save_head = save_buffer;
-
+	trace_printf("store_execution_buffers, ");
+	
 	Execution_Buffers execution_buffers_copy = execution_buffers;
 	execution_buffers_copy.program_buffer = 0;
 	execution_buffers_copy.state_buffer = 0;
 	execution_buffers_copy.tick_data_buffer = 0;
-	memcpy(save_head, &execution_buffers, sizeof(execution_buffers_copy)); save_head += sizeof(execution_buffers);
-	memcpy(save_head, execution_buffers.program_buffer, execution_buffers.program_buffer_size); save_head += execution_buffers.program_buffer_size;
-	memcpy(save_head, execution_buffers.state_buffer, execution_buffers.state_stride * execution_buffers.state_max_count); save_head += execution_buffers.state_stride * execution_buffers.state_max_count;
-	memcpy(save_head, execution_buffers.tick_data_buffer, sizeof(struct Tick_Data) * execution_buffers.tick_max_count); save_head += sizeof(struct Tick_Data) * execution_buffers.tick_max_count;
+	
+	fwrite(&execution_buffers_copy, sizeof(execution_buffers_copy), 1, save_file);
+	fwrite(execution_buffers.program_buffer, execution_buffers.program_buffer_size, 1, save_file);
+	fwrite(execution_buffers.state_buffer, execution_buffers.state_stride, execution_buffers.state_max_count, save_file);
+	fwrite(execution_buffers.tick_data_buffer, sizeof(struct Tick_Data), execution_buffers.tick_max_count, save_file);
+
+	print_bytes("program_buffer", execution_buffers.program_buffer, 80);
+	print_bytes("state_buffer", execution_buffers.state_buffer, 80);
+	print_bytes("tick_data_buffer", execution_buffers.tick_data_buffer, 80);
 }
 
-size_t get_execution_buffers_save_size(Execution_Buffers execution_buffers)
+Execution_Buffers load_execution_buffers(FILE* save_file)
 {
-	size_t save_size
-		= sizeof(execution_buffers)
-		+ execution_buffers.program_buffer_size
-		+ execution_buffers.state_stride * execution_buffers.state_max_count
-		+ sizeof(struct Tick_Data) * execution_buffers.tick_max_count;
+	trace_printf("load_execution_buffers, ");
 
-	trace_printf("get_execution_buffers_size: %lld\n", save_size);
-
-	return save_size;
-}
-
-//size_t get_saved_execution_buffers_size(const void* save_buffer)
-//{
-//	Execution_Buffers execution_buffers = {0};
-//	memcpy(&execution_buffers, save_buffer, sizeof(execution_buffers));
-//	return get_execution_buffers_size(execution_buffers);
-//}
-
-Execution_Buffers load_execution_buffers(void* save_buffer)
-{
 	Execution_Buffers execution_buffers = {0};
-	
-	void* save_head = save_buffer;
 
-	memcpy(&execution_buffers, save_head, sizeof(execution_buffers)); save_head += sizeof(execution_buffers);
-	execution_buffers.program_buffer = save_head; save_head += execution_buffers.program_buffer_size;
-	execution_buffers.state_buffer = save_head; save_head += execution_buffers.state_stride * execution_buffers.state_max_count;
-	execution_buffers.tick_data_buffer = save_head; save_head += sizeof(struct Tick_Data) * execution_buffers.tick_max_count;
+	fread(&execution_buffers, sizeof(execution_buffers), 1, save_file);
 
-	void* program_buffer = malloc(execution_buffers.program_buffer_size);
-	memcpy(program_buffer, execution_buffers.program_buffer, execution_buffers.program_buffer_size);
-	execution_buffers.program_buffer = program_buffer;
-	
-	DWORD old;
-	if (!VirtualProtect(execution_buffers.program_buffer, execution_buffers.program_buffer_size, PAGE_EXECUTE, &old))
-	{
-		FATAL(0, "Couldn't change page protection. Old protection value: %d, new %d, err:0x%llX, size: 0x%llX", old, PAGE_EXECUTE, GetLastError(), execution_buffers.program_buffer_size);
-	}
+	execution_buffers.program_buffer = malloc(execution_buffers.program_buffer_size);
+	execution_buffers.state_buffer = malloc(execution_buffers.state_stride * execution_buffers.state_max_count);
+	execution_buffers.tick_data_buffer = malloc(sizeof(struct Tick_Data) * execution_buffers.tick_max_count);
 
-	printf("load_execution_buffers: %lld\n", save_head - save_buffer);
-	printf("program_buffer: 0x%llX\n", execution_buffers.program_buffer);
+	fread(execution_buffers.program_buffer, execution_buffers.program_buffer_size, 1, save_file);
+	fread(execution_buffers.state_buffer, execution_buffers.state_stride, execution_buffers.state_max_count, save_file);
+	fread(execution_buffers.tick_data_buffer, sizeof(struct Tick_Data), execution_buffers.tick_max_count, save_file);
+
+	print_bytes("program_buffer", execution_buffers.program_buffer, 80);
+	print_bytes("state_buffer", execution_buffers.state_buffer, 80);
+	print_bytes("tick_data_buffer", execution_buffers.tick_data_buffer, 80);
+
+	//DWORD old;
+	//if (!VirtualProtect(execution_buffers.program_buffer, execution_buffers.program_buffer_size, PAGE_EXECUTE, &old))
+	//{
+	//	FATAL(0, "Couldn't change page protection. Old protection value: %d, new %d, err:0x%llX, size: 0x%llX", old, PAGE_EXECUTE, GetLastError(), execution_buffers.program_buffer_size);
+	//}
 
 	return execution_buffers;
 }
 
 void release_loaded_execution_buffers(Execution_Buffers execution_buffers)
 {
-	void* file_mapping = execution_buffers.state_buffer - execution_buffers.program_buffer_size - sizeof(execution_buffers);
+	trace_printf("release_loaded_execution_buffers, ");
 
-	printf("UnmapViewOfFile: 0x%llX\n", file_mapping);
-	UnmapViewOfFile(file_mapping);
+	//DWORD old;
+	//if (!VirtualProtect(execution_buffers.program_buffer,  execution_buffers.program_buffer_size, PAGE_READWRITE, &old))
+	//{
+	//	FATAL(0, "Couldn't change page protection. Old protection value: %d", old);
+	//}
 
-	DWORD old;
-	if (!VirtualProtect(execution_buffers.program_buffer,  execution_buffers.program_buffer_size, PAGE_READWRITE, &old))
-	{
-		FATAL(0, "Couldn't change page protection. Old protection value: %d", old);
-	}
-	
-	printf("free: 0x%llX\n", execution_buffers.program_buffer);
 	free(execution_buffers.program_buffer);
-	
+	free(execution_buffers.state_buffer);
+	free(execution_buffers.tick_data_buffer);
+
 	printf("Released!\n");
 }
 
 void run()
 {
-	void* save_buffer = 0;
+	enum { DO_PLAY=1, DO_REPLAY=1,  };
 	
+	if (DO_PLAY)
 	{
 		Execution_Buffers execution_buffers = create_execution_buffers();
 
-		//run_recompilation_loop(execution_buffers);
+		run_recompilation_loop(execution_buffers);
+		trace_printf("run_recompilation_loop end\n");
 
 		size_t save_size = get_execution_buffers_save_size(execution_buffers);
 	
-		HANDLE file_handle = CreateFile("./map_file_test.bin", GENERIC_READ|GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
-		if (file_handle == INVALID_HANDLE_VALUE)
-			file_handle = CreateFile("./map_file_test.bin", GENERIC_READ|GENERIC_WRITE, 0, 0, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, 0);
-		FATAL(file_handle != INVALID_HANDLE_VALUE, "Couldn't open save file: 0x%X", GetLastError());
+		FILE* file = fopen("./map_file_test.bin", "wb");
+		FATAL(file, "Couldn't open file for writing. Err: 0x%X", GetLastError());
 
-		HANDLE map_file_handle = CreateFileMapping(file_handle, 0, PAGE_READWRITE, 0, save_size, 0);
-		FATAL(map_file_handle != INVALID_HANDLE_VALUE, "Couldn't create a map file: 0x%X", GetLastError());
+		store_execution_buffers(execution_buffers, file);
 
-		save_buffer = MapViewOfFile(map_file_handle, FILE_MAP_ALL_ACCESS, 0,0,0);
-		FATAL(save_buffer, "Couldn't map a file to memory: 0x%X", GetLastError());
-		
-		printf("\n");
-		for (int i = 0; i < sizeof(Execution_Buffers); ++i)
-			printf("%hhX ", ((char*)save_buffer)[i]);
-		printf("\n");
-	
-		CloseHandle(map_file_handle);
-		CloseHandle(file_handle);
-
-		//store_execution_buffers(execution_buffers, save_buffer);
-		
-		
-		printf("\n");
-		for (int i = 0; i < sizeof(Execution_Buffers); ++i)
-			printf("%hhX ", ((char*)save_buffer)[i]);
-		printf("\n");
-		
-		//Execution_Buffers loaded_execution_buffers = load_execution_buffers(save_buffer);
-		//release_loaded_execution_buffers(loaded_execution_buffers);
+		fclose(file);
 	}
 
-	Execution_Buffers loaded_execution_buffers = load_execution_buffers(save_buffer);
+	if (DO_REPLAY)
+	{
+		FILE* file = fopen("./map_file_test.bin", "rb");
+		Execution_Buffers loaded_execution_buffers = load_execution_buffers(file);
+		fclose(file);
 
-	replay(loaded_execution_buffers);
-	do_rewind(loaded_execution_buffers);
+		replay(loaded_execution_buffers);
+		do_rewind(loaded_execution_buffers);
 
-	printf("save_buffer: 0x%llX\n", save_buffer);
-	release_loaded_execution_buffers(loaded_execution_buffers);
+		release_loaded_execution_buffers(loaded_execution_buffers);
+	}
 }
 
 LONG exception_handler(LPEXCEPTION_POINTERS p)
@@ -1278,6 +1304,8 @@ LONG exception_handler(LPEXCEPTION_POINTERS p)
 
 void _start()
 {
+	trace_printf("_start()\n");
+	
 	SetUnhandledExceptionFilter((LPTOP_LEVEL_EXCEPTION_FILTER)&exception_handler);
 	
 	run();
@@ -1297,6 +1325,10 @@ void _runmain() { _start(); }
 #include <time.h>
 
 #include "tetris.h"
+
+enum { TRACE_PAINT=1&&TRACE };
+
+#define paint_printf(...) do { if (TRACE_PAINT) printf(__VA_ARGS__); } while(0)
 
 typedef struct
 {
@@ -1319,8 +1351,14 @@ enum { StateInitializedMagicNumber = 123456 };
 
 typedef void Drawer;
 
+extern void fill(Drawer* drawer, int r, int g, int b);
+extern void pixel(Drawer* drawer, int x, int y, int r, int g, int b);
+extern void text_w(Drawer* drawer, int x, int y, wchar_t* str, int strLen);
+
 void paint(Communication* communication, Drawer* drawer)
 {
+	paint_printf("paint, ");
+	
 	fill(drawer, 255, 255, 255);
 	rect(drawer, 20, 20, 200, 200, 255, 255, 0);
 
@@ -1338,6 +1376,8 @@ void paint(Communication* communication, Drawer* drawer)
 
 	if (state)
 		tetris_draw(drawer, &state->tetris);
+
+	paint_printf("paint end, ");
 }
 
 int key_down(Communication* communication, int vk_key_code)
@@ -1379,13 +1419,14 @@ static void setup(State* state, Input* input)
 	memset(state, 0, sizeof(*state));
 	memset(input, 0, sizeof(*input));
 
-	trace_printf("Initializing state...\n");
+	trace_printf("Initializing state (0x%llX)...\n", (void*)state);
+	
 	state->initialized = StateInitializedMagicNumber;
 	state->tick = 0;
 	state->x = 200;
 	state->y = 150;
 
-	printf("\n\nGo to the `tick` function at line %d of this source file and edit the 'state->x' and 'state->y' variables or something and see what happens. :)\n\n", __LINE__ + 3);
+	printf("\nGo to the `tick` function at line %d of this source file and edit the 'state->x' and 'state->y' variables or something and see what happens. :)\n\n", __LINE__ + 3);
 }
 
 static void tick(State* state, Input* input, signed long long time_us)
