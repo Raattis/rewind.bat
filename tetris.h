@@ -124,19 +124,18 @@ int move_to(Tetris* tetris, int x, int y, int r)
 	return move_piece_to(&tetris->current_piece, tetris, x, y, r);
 }
 
-typedef void Drawer;
-void tetris_draw(Drawer* drawer, Tetris* tetris)
+void tetris_draw(Drawer_Funcs drawer_funcs, void* drawer, Tetris* tetris)
 {
-	tetris_printf("DRAW tetris fall timer: %lld\n", tetris->fall_timer);
-	tetris_printf("DRAW tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
+	paint_printf("DRAW tetris fall timer: %lld\n", tetris->fall_timer);
+	paint_printf("DRAW tetris piece x,y: %d,%d\n", tetris->current_piece.x,tetris->current_piece.y);
 
 	int screen_width, screen_height;
-	get_screen_width_and_height(drawer, &screen_width, &screen_height);
+	drawer_funcs.get_screen_width_and_height(drawer, &screen_width, &screen_height);
 
 	int h = (screen_height - 20) / TetrisHeight;
 	int w = h;
 	int margin = w/2;
-	rect(drawer, 0, 0, w * TetrisWidth + margin*2, w * TetrisHeight + margin*2, 70,10,50);
+	drawer_funcs.rect(drawer, 0, 0, w * TetrisWidth + margin*2, w * TetrisHeight + margin*2, 70,10,50);
 
 	TetrisPiece shadow_piece = tetris->current_piece;
 	while (move_piece_to(&shadow_piece, tetris, 0, 1, 0)) {}
@@ -189,16 +188,16 @@ void tetris_draw(Drawer* drawer, Tetris* tetris)
 
 			r/=divider; g/=divider; b/=divider;
 
-			rect(drawer, x * w + margin, y * h + margin, w, h, r,g,b);
+			drawer_funcs.rect(drawer, x * w + margin, y * h + margin, w, h, r,g,b);
 		}
 	}
 
 	char score_buffer[32];
 	sprintf(score_buffer, "%d", tetris->score);
-	text(drawer, screen_width / 2, 30, score_buffer, -1);
+	drawer_funcs.text(drawer, screen_width / 2, 30, score_buffer, -1);
 
 	if (tetris->game_over)
-		text(drawer, screen_width / 2, 60, "Game Over!", -1);
+		drawer_funcs.text(drawer, screen_width / 2, 60, "Game Over!", -1);
 }
 
 int tetris_update(Tetris* tetris, Tetris_Input* tetris_input, i64 time_us)
