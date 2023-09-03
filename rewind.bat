@@ -183,9 +183,10 @@ typedef struct
 
 #include "wm_message_to_string.h"
 
-enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=0&&TRACE };
+enum { TRACE_INPUT=0&&TRACE, TRACE_TICKS=0&&TRACE, TRACE_PAINT=0&&TRACE };
 
 #define input_printf(...) do { if (TRACE_INPUT) printf(__VA_ARGS__); } while(0)
+#define paint_printf(...) do { if (TRACE_PAINT) printf(__VA_ARGS__); } while(0)
 #define tick_printf(...) do { if (TRACE_TICKS) printf(__VA_ARGS__); } while(0)
 
 signed long long microseconds(void)
@@ -458,11 +459,15 @@ typedef struct
 	void* input_buffer;
 	Paint_Func paint_func;
 	Key_Down_Func key_down_func;
+
+	int scrub_value;
+	int scrub_value_max;
 } MessageHandlingData;
 
+#define verbose_print_bytes(...) do { if (TRACE_VERBOSE) printf(__VA_ARGS__); } while(0)
 void print_bytes(const char* label, void* bytes, size_t length)
 {
-	if (!TRACE_VERBOSE)
+	if (!TRACE)
 		return;
 
 	printf("\n%s [0x%llX..0x%llX]:\n", label, bytes, bytes + length);
@@ -535,10 +540,8 @@ void text_w(Drawer* drawer, int x, int y, wchar_t* str, int strLen)
 	DrawTextExW(drawer->hdc, str, strLen, &rect, DT_NOCLIP|DT_NOPREFIX|DT_SINGLELINE|DT_CENTER|DT_VCENTER, 0);
 }
 
-LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+LRESULT window_message_handler_no_input_impl(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-	input_printf("\n\twindow_message_handler_impl(%s, %lld, %lld) ", wm_get_string(message), (long long)wParam, (long long)lParam);
-
 	switch (message)
 	{
 		case WM_CREATE:
@@ -574,41 +577,13 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 			Drawer drawer;
 			open_drawer(hWnd, &drawer);
 
-			print_bytes("paint_func", message_handling_data->paint_func, 80);
+			input_printf("paint_func, ");
+			verbose_print_bytes("paint_func", message_handling_data->paint_func, 80);
 			message_handling_data->paint_func(&communication, drawer_funcs, &drawer);
+			input_printf("done, ");
 
 			close_drawer(hWnd, &drawer);
 			return 1;
-		}
-		case WM_KEYDOWN:
-		{
-			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-			FATAL(message_handling_data, "message_handling_data was NULL in %s", wm_get_string(message));
-			FATAL(message_handling_data->key_down_func, "paint_func was not set for %s", wm_get_string(message));
-			FATAL(message_handling_data->input_buffer, "input_buffer was not set for %s", wm_get_string(message));
-
-			if (wParam == VK_ESCAPE)
-			{
-				printf("VK_ESCAPE\n");
-				DestroyWindow(hWnd);
-				message_handling_data->window_close_requested = 1;
-				return 0;
-			}
-
-			Communication communication = {0};
-			communication.input_buffer = message_handling_data->input_buffer;
-
-			if (!communication.input_buffer)
-			{
-				fprintf(stderr, "Trying to handle input with user buffer not defined.");
-			}
-			else
-			{
-				if (!message_handling_data->key_down_func(&communication, wParam))
-					return 0;
-			}
-
-			break;
 		}
 		case WM_QUIT:
 			printf("WM_QUIT\n");
@@ -631,29 +606,158 @@ LRESULT window_message_handler(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
 	return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
-HWND create_window(void)
+LRESULT window_message_handler_no_input(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
-	trace_printf("create_window\n");
+	input_printf("\n\twindow_message_handler_no_input(%s, %lld, %lld) ", wm_get_string(message), (long long)wParam, (long long)lParam);
+	LRESULT return_value = window_message_handler_no_input_impl(hWnd, message, wParam, lParam);
+	input_printf("return_value: %d, ", return_value);
+	return return_value;
+}
+
+LRESULT window_message_handler_gameplay(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	input_printf("\n\twindow_message_handler_gameplay(%s, %lld, %lld) ", wm_get_string(message), (long long)wParam, (long long)lParam);
+
+	switch (message)
+	{
+		case WM_KEYDOWN:
+		{
+			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			FATAL(message_handling_data, "message_handling_data was NULL in %s", wm_get_string(message));
+			FATAL(message_handling_data->key_down_func, "paint_func was not set for %s", wm_get_string(message));
+			FATAL(message_handling_data->input_buffer, "input_buffer was not set for %s", wm_get_string(message));
+
+			if (wParam == VK_ESCAPE)
+			{
+				printf("VK_ESCAPE\n");
+				message_handling_data->window_close_requested = 1;
+				DestroyWindow(hWnd);
+				return 0;
+			}
+
+			Communication communication = {0};
+			communication.input_buffer = message_handling_data->input_buffer;
+
+			if (!communication.input_buffer)
+			{
+				fprintf(stderr, "Trying to handle input with user buffer not defined.");
+			}
+			else
+			{
+				if (!message_handling_data->key_down_func(&communication, wParam))
+					return 0;
+			}
+
+			break;
+		}
+		default:
+			break;
+	}
+
+	LRESULT return_value = window_message_handler_no_input_impl(hWnd, message, wParam, lParam);
+	input_printf("return_value: %d, ", return_value);
+	return return_value;
+}
+
+LRESULT window_message_handler_scrubbing(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	input_printf("\n\twindow_message_handler_scrubbing(%s, %lld, %lld) ", wm_get_string(message), (long long)wParam, (long long)lParam);
+
+	switch (message)
+	{
+		case WM_KEYDOWN:
+		{
+			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			input_printf("scrub_value: %d/%d\n", message_handling_data->scrub_value, message_handling_data->scrub_value_max);
+			if (wParam == VK_ESCAPE)
+			{
+				printf("VK_ESCAPE\n");
+				message_handling_data->window_close_requested = 1;
+				DestroyWindow(hWnd);
+				return 0;
+			}
+			else if (wParam == VK_LEFT)
+			{
+				if (message_handling_data->scrub_value > 0)
+					message_handling_data->scrub_value -= 1;
+				return 0;
+			}
+			else if (wParam == VK_RIGHT)
+			{
+				if (message_handling_data->scrub_value < message_handling_data->scrub_value_max)
+					message_handling_data->scrub_value += 1;
+				return 0;
+			}
+			break;
+		}
+		case WM_MOUSEMOVE:
+		{
+			MessageHandlingData* message_handling_data = (MessageHandlingData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+			FATAL(message_handling_data->scrub_value_max > 0, "No ticks. :(");
+
+			RECT screen_rect;
+			GetClientRect(hWnd, &screen_rect);
+			int screen_width = screen_rect.right;
+			int mouse_x = ((int)lParam) & 0xFFFF;
+			int mouse_y = (((int)lParam) >> 16) & 0xFFFF;
+			input_printf("mousepos(x:%d, y:%d), ", mouse_x, mouse_y);
+
+			message_handling_data->scrub_value = (mouse_x * message_handling_data->scrub_value_max) / screen_width;
+			input_printf(" %p, scrub_value: %d/%d\n", message_handling_data, message_handling_data->scrub_value, message_handling_data->scrub_value_max);
+			return 0;
+		}
+		default:
+			break;
+	}
+
+	LRESULT return_value = window_message_handler_no_input_impl(hWnd, message, wParam, lParam);
+	input_printf("return_value: %d, ", return_value);
+	return return_value;
+}
+
+typedef enum
+{
+	Window_Type_Gameplay,
+	Window_Type_No_Input,
+	Window_Type_Scrubbing,
+} Window_Type;
+
+HWND create_window(Window_Type window_type)
+{
+	trace_printf("create_window(%d)\n", window_type);
 
 	WNDCLASSEX wcex;
 	memset(&wcex, 0, sizeof(WNDCLASSEX));
 	wcex.cbSize = sizeof(WNDCLASSEX);
 	wcex.style = CS_HREDRAW | CS_VREDRAW;
-	wcex.lpfnWndProc = window_message_handler;
+	if (window_type == Window_Type_Gameplay)
+		wcex.lpfnWndProc = window_message_handler_gameplay;
+	else if (window_type == Window_Type_No_Input)
+		wcex.lpfnWndProc = window_message_handler_no_input;
+	else if (window_type == Window_Type_Scrubbing)
+		wcex.lpfnWndProc = window_message_handler_scrubbing;
+
 	wcex.hInstance = GetModuleHandle(NULL);
 	wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
 	wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-	wcex.lpszClassName = "MyWindowClass";
+	if (window_type == Window_Type_Gameplay)
+		wcex.lpszClassName = "MyWindowClassGameplay";
+	else if (window_type == Window_Type_No_Input)
+		wcex.lpszClassName = "MyWindowClassNoInput";
+	else if (window_type == Window_Type_Scrubbing)
+		wcex.lpszClassName = "MyWindowClassScrubbing";
 	RegisterClassEx(&wcex);
 
 	RECT rc = { 0, 0, 400, 300 };
 	AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
 
 	// TODO: No hardcoded name. Get the name of the executable from commandline arguments.
-	HWND hWnd = CreateWindow("MyWindowClass", GetCommandLine(), WS_OVERLAPPEDWINDOW,
+	HWND hWnd = CreateWindow(wcex.lpszClassName, GetCommandLine(), WS_OVERLAPPEDWINDOW,
 		CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
 		NULL, NULL, GetModuleHandle(NULL), NULL);
 	ShowWindow(hWnd, SW_SHOW);
+
+	trace_printf("window created!\n");
 
 	return hWnd;
 }
@@ -685,7 +789,7 @@ int poll_repaint(HWND hWnd, Paint_Func paint_func, void* user_buffer)
 	else
 		input_printf("after ");
 
-	while (PeekMessage(&msg, hWnd, WM_KEYLAST-1, ~0u, PM_REMOVE))
+	while (PeekMessage(&msg, hWnd, WM_MOUSELAST-1, ~0u, PM_REMOVE))
 	{
 		message_received = 1;
 		TranslateMessage(&msg);
@@ -720,7 +824,7 @@ int poll_input(HWND hWnd, Key_Down_Func key_down_func, void* input_buffer)
 	SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)&message_handling_data);
 
 	MSG msg;
-	while (PeekMessage(&msg, hWnd, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE))
+	while (PeekMessage(&msg, hWnd, WM_KEYFIRST, WM_MOUSELAST, PM_REMOVE))
 	{
 		message_received = 1;
 		TranslateMessage(&msg);
@@ -757,6 +861,8 @@ void wait_for_change(file_timestamp* newest_file_timestamp, struct headers_and_s
 
 int simulate_ghost_tick(void* user_buffer, int user_buffer_size, const struct Tick_Data* tick, const void* state_buffer_start, const void* program_buffer_start)
 {
+	verbose_printf("simulate_ghost_tick(%p, %lld), ", program_buffer_start, tick->update_func_offset);
+
 	FATAL(!tick->skip, "Simulating skipped ticks is not safe.");
 
 	char input_buffer[100] = {0};
@@ -771,8 +877,13 @@ int simulate_ghost_tick(void* user_buffer, int user_buffer_size, const struct Ti
 	communication.user_buffer_size = user_buffer_size;
 	communication.ghost_frame = 1;
 
-	Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
-	update(&communication);
+	Update_Func update_func = (Update_Func)(program_buffer_start + tick->update_func_offset);
+	
+	verbose_printf("calling update_func %p, ", update_func);
+
+	update_func(&communication);
+
+	verbose_printf("update_func done, ");
 
 	return communication.redraw_requested;
 }
@@ -792,8 +903,8 @@ int simulate_tick(void* user_buffer, int user_buffer_size, const struct Tick_Dat
 	communication.user_buffer = user_buffer;
 	communication.user_buffer_size = user_buffer_size;
 
-	Update_Func update = (Update_Func)(program_buffer_start + tick->update_func_offset);
-	update(&communication);
+	Update_Func update_func = (Update_Func)(program_buffer_start + tick->update_func_offset);
+	update_func(&communication);
 
 	return communication.redraw_requested;
 }
@@ -821,7 +932,7 @@ int replay_tick(HWND hWnd, void* user_buffer, int user_buffer_size, const struct
 	if (redraw_requested)
 	{
 		paint_tick(hWnd, user_buffer, tick, program_buffer_start);
-		Sleep(16);
+		//Sleep(16);
 	}
 
 	return tick->stop;
@@ -850,7 +961,7 @@ void replay(Execution_Buffers execution_buffers)
 
 	HWND hWnd = 0;
 	if (!is_window_open(hWnd))
-		hWnd = create_window();
+		hWnd = create_window(Window_Type_No_Input);
 
 	char user_buffer[1000] = {0};
 	const int user_buffer_size = sizeof(user_buffer);
@@ -867,7 +978,7 @@ void replay(Execution_Buffers execution_buffers)
 	}
 
 	trace_printf("Replay ended!\n");
-	Sleep(1000);
+	//Sleep(1000);
 	DestroyWindow(hWnd);
 }
 
@@ -881,7 +992,7 @@ void do_rewind(Execution_Buffers execution_buffers)
 
 	HWND hWnd = 0;
 	if (!is_window_open(hWnd))
-		hWnd = create_window();
+		hWnd = create_window(Window_Type_No_Input);
 
 	char user_buffer[1000] = {0};
 	const int user_buffer_size = sizeof(user_buffer);
@@ -918,12 +1029,145 @@ void do_rewind(Execution_Buffers execution_buffers)
 		if (repaint)
 		{
 			paint_tick(hWnd, user_buffer, end, program_buffer_start);
-			Sleep(16);
+			//Sleep(16);
 		}
 	}
 	paint_tick(hWnd, first_user_buffer, first, program_buffer_start);
 
-	trace_printf("Replay ended!\n");
+	trace_printf("Rewind ended!\n");
+	//Sleep(1000);
+	DestroyWindow(hWnd);
+}
+
+
+typedef struct {
+	unsigned tick_count;
+	unsigned current_tick;
+	unsigned target_tick;
+} Scrubbing_State;
+
+int scrubbing_input(HWND hWnd, Scrubbing_State* scrubbing)
+{
+	input_printf("\rscrubbing_input %d/%d { ", scrubbing->current_tick, scrubbing->tick_count);
+
+	if (!hWnd)
+		return 1;
+
+	int message_received = 0;
+
+	MessageHandlingData message_handling_data = {0};
+	message_handling_data.scrub_value = scrubbing->target_tick;
+	message_handling_data.scrub_value_max = scrubbing->tick_count;
+	SetWindowLongPtr(hWnd, GWLP_USERDATA, (LONG_PTR)&message_handling_data);
+
+	input_printf("polling starting %p, ", &message_handling_data);
+
+	MSG msg;
+	while (PeekMessage(&msg, hWnd, WM_KEYFIRST, WM_MOUSELAST, PM_REMOVE))
+	{
+		message_received = 1;
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+
+	input_printf("polling done, ");
+
+	SetWindowLongPtr(hWnd, GWLP_USERDATA, 0);
+
+	if (message_received)
+		input_printf("\n}\n");
+	else
+		input_printf("} ");
+
+	scrubbing->target_tick = message_handling_data.scrub_value;
+	input_printf("end scrub:%d, ", scrubbing->target_tick);
+
+	return message_handling_data.window_close_requested;
+}
+
+void do_scrubbing(Execution_Buffers execution_buffers)
+{
+	trace_printf("do_scrubbing\n");
+
+	const struct Tick_Data* tick_data_buffer_start = execution_buffers.tick_data_buffer;
+	const void* state_buffer_start = execution_buffers.state_buffer;
+	const void* program_buffer_start = execution_buffers.program_buffer;
+
+	HWND hWnd = 0;
+	if (is_window_open(hWnd))
+		DestroyWindow(hWnd);
+	hWnd = create_window(Window_Type_Scrubbing);
+
+	verbose_printf("create_window done, ");
+
+	const struct Tick_Data* end = tick_data_buffer_start;
+	for(;; end++)
+	{
+		if (end->stop)
+			break;
+	}
+
+	verbose_printf("\nsimulate_ghost_tick, ");
+
+	const struct Tick_Data* first = tick_data_buffer_start + 1;
+	char first_user_buffer[1000] = {0};
+	simulate_tick(first_user_buffer, sizeof(first_user_buffer), first, state_buffer_start, program_buffer_start);
+	paint_tick(hWnd, first_user_buffer, first, program_buffer_start);
+
+	verbose_printf("done, ");
+
+	Scrubbing_State scrubbing;
+	scrubbing.tick_count = end - first;
+	scrubbing.current_tick = 0;
+	scrubbing.target_tick = 0;
+
+	verbose_printf("\n");
+	tick_printf("\nTick count: %lld\n", scrubbing.tick_count);
+
+	char user_buffer[1000];
+	const int user_buffer_size = sizeof(user_buffer);
+
+	verbose_printf("starting loop, ");
+
+	const struct Tick_Data* valid_tick = 0;
+	do
+	{
+		const int changed = scrubbing.current_tick != scrubbing.target_tick;
+		if (scrubbing.current_tick > scrubbing.target_tick)
+		{
+			scrubbing.current_tick = 0;
+			memcpy(user_buffer, first_user_buffer, user_buffer_size);
+			valid_tick = first;
+		}
+
+		for (; scrubbing.current_tick < scrubbing.target_tick; )
+		{
+			++scrubbing.current_tick;
+			const struct Tick_Data* tick = first + scrubbing.current_tick;
+			FATAL(tick <= end, "Scrubbing overrun. %p <= %p", tick, end);
+			if (tick->skip)
+				continue;
+
+			if (tick->redraw_requested)
+				valid_tick = tick;
+
+			const int is_target_frame = scrubbing.current_tick == scrubbing.target_tick;
+			if (is_target_frame)
+			{
+				simulate_tick(user_buffer, user_buffer_size, tick, state_buffer_start, program_buffer_start);
+				break;
+			}
+
+			simulate_ghost_tick(user_buffer, user_buffer_size, tick, state_buffer_start, program_buffer_start);
+		}
+
+		if (valid_tick && changed)
+			paint_tick(hWnd, user_buffer, valid_tick, program_buffer_start);
+
+		Sleep(16);
+	} while(!scrubbing_input(hWnd, &scrubbing));
+
+	trace_printf("Scrubbing ended!\n");
 	Sleep(1000);
 	DestroyWindow(hWnd);
 }
@@ -965,7 +1209,7 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 	const char* source_buffer_start = source_buffer;
 	const char* source_buffer_end = source_buffer + source_buffer_size;
 
-	HWND hWnd = create_window();
+	HWND hWnd = create_window(Window_Type_Gameplay);
 	const struct Tick_Data* prev_tick_data = 0;
 
 	for (;;)
@@ -1281,9 +1525,9 @@ void store_execution_buffers(Execution_Buffers execution_buffers, FILE* save_fil
 	fwrite(execution_buffers.state_buffer, execution_buffers.state_stride, execution_buffers.state_max_count, save_file);
 	fwrite(execution_buffers.tick_data_buffer, sizeof(struct Tick_Data), execution_buffers.tick_max_count, save_file);
 
-	print_bytes("program_buffer", execution_buffers.program_buffer, 80);
-	print_bytes("state_buffer", execution_buffers.state_buffer, 80);
-	print_bytes("tick_data_buffer", execution_buffers.tick_data_buffer, 80);
+	verbose_print_bytes("program_buffer", execution_buffers.program_buffer, 80);
+	verbose_print_bytes("state_buffer", execution_buffers.state_buffer, 80);
+	verbose_print_bytes("tick_data_buffer", execution_buffers.tick_data_buffer, 80);
 }
 
 Execution_Buffers load_execution_buffers(FILE* save_file)
@@ -1302,9 +1546,9 @@ Execution_Buffers load_execution_buffers(FILE* save_file)
 	fread(execution_buffers.state_buffer, execution_buffers.state_stride, execution_buffers.state_max_count, save_file);
 	fread(execution_buffers.tick_data_buffer, sizeof(struct Tick_Data), execution_buffers.tick_max_count, save_file);
 
-	print_bytes("program_buffer", execution_buffers.program_buffer, 80);
-	print_bytes("state_buffer", execution_buffers.state_buffer, 80);
-	print_bytes("tick_data_buffer", execution_buffers.tick_data_buffer, 80);
+	verbose_print_bytes("program_buffer", execution_buffers.program_buffer, 80);
+	verbose_print_bytes("state_buffer", execution_buffers.state_buffer, 80);
+	verbose_print_bytes("tick_data_buffer", execution_buffers.tick_data_buffer, 80);
 
 	DWORD old;
 	if (!VirtualProtect(execution_buffers.program_buffer, execution_buffers.program_buffer_size, PAGE_EXECUTE, &old))
@@ -1341,7 +1585,9 @@ void release_loaded_execution_buffers(Execution_Buffers execution_buffers)
 
 void run()
 {
-	enum { DO_PLAY=1, DO_REPLAY=1,  };
+	enum { DO_PLAY=1, DO_SAVE=1, DO_REPLAY=1, DO_REWIND=1, DO_SCRUBBING=1, };
+
+	const char replay_filename[] = "./replay_file.bin";
 
 	if (DO_PLAY)
 	{
@@ -1352,22 +1598,39 @@ void run()
 
 		size_t save_size = get_execution_buffers_save_size(execution_buffers);
 
-		FILE* file = fopen("./map_file_test.bin", "wb");
-		FATAL(file, "Couldn't open file for writing. Err: 0x%X", GetLastError());
+		if (DO_SAVE)
+		{
+			FILE* file = fopen(replay_filename, "wb");
+			FATAL(file, "Couldn't open file for writing. Err: 0x%X", GetLastError());
 
-		store_execution_buffers(execution_buffers, file);
+			store_execution_buffers(execution_buffers, file);
 
-		fclose(file);
+			fclose(file);
+		}
 	}
 
-	if (DO_REPLAY)
+	if (DO_REPLAY || DO_REWIND)
 	{
-		FILE* file = fopen("./map_file_test.bin", "rb");
+		FILE* file = fopen(replay_filename, "rb");
 		Execution_Buffers loaded_execution_buffers = load_execution_buffers(file);
 		fclose(file);
 
-		replay(loaded_execution_buffers);
-		do_rewind(loaded_execution_buffers);
+		if (DO_REPLAY)
+			replay(loaded_execution_buffers);
+
+		if (DO_REWIND)
+			do_rewind(loaded_execution_buffers);
+
+		release_loaded_execution_buffers(loaded_execution_buffers);
+	}
+
+	if (DO_SCRUBBING)
+	{
+		FILE* file = fopen("./replay_file.bin", "rb");
+		Execution_Buffers loaded_execution_buffers = load_execution_buffers(file);
+		fclose(file);
+
+		do_scrubbing(loaded_execution_buffers);
 
 		release_loaded_execution_buffers(loaded_execution_buffers);
 	}
@@ -1434,7 +1697,7 @@ enum { StateInitializedMagicNumber = 123456 };
 
 void paint(Communication* communication, Drawer_Funcs drawer_funcs, void* drawer)
 {
-	verbose_func();
+	paint_printf("paint, ");
 
 	drawer_funcs.fill(drawer, 255, 255, 255);
 
@@ -1493,6 +1756,8 @@ static void setup(State* state, Input* input)
 	if (state->initialized == StateInitializedMagicNumber)
 		return;
 
+	verbose_printf("setup, ");
+
 	trace_printf("Clearing state...\n");
 	memset(state, 0, sizeof(*state));
 	memset(input, 0, sizeof(*input));
@@ -1509,6 +1774,8 @@ static void setup(State* state, Input* input)
 
 static void tick(State* state, Input* input, signed long long time_us)
 {
+	verbose_printf("tick(%lld), ", time_us);
+	
 	// Modify these, save and note the cross in the window being painted to a different spot
 	state->x = 200;
 	state->y = 100;
@@ -1519,6 +1786,8 @@ static void tick(State* state, Input* input, signed long long time_us)
 
 void update(Communication* communication)
 {
+	verbose_printf("update, ");
+
 	FATAL(sizeof(State) <= communication->user_buffer_size, "State is larger than the user_buffer. %lld <= %lld", sizeof(State), communication->user_buffer_size);
 	FATAL(sizeof(Input) <= communication->input_buffer_size, "Input is larger than the input_buffer. %lld <= %lld", sizeof(Input), communication->input_buffer_size);
 
