@@ -1803,10 +1803,7 @@ int sprintfFloat(int indent, char* buffer, const void* fmt, const void* ptr)
 
 int sprintfDouble(int indent, char* buffer, const void* fmt, const void* ptr)
 {
-	char* original = buffer;
-	buffer += sprintfIndent(indent, buffer);
-	buffer += sprintf(buffer, (const char*)fmt, *(double*)ptr);
-	return buffer - original;
+	return sprintf(buffer, (const char*)fmt, *(double*)ptr);
 }
 
 #define GET_PRINTF_FUNC(x) _Generic((x), \
