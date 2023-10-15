@@ -1585,7 +1585,7 @@ void release_loaded_execution_buffers(Execution_Buffers execution_buffers)
 
 void run()
 {
-	enum { DO_PLAY=1, DO_SAVE=1, DO_REPLAY=1, DO_REWIND=1, DO_SCRUBBING=1, };
+	enum { DO_PLAY=1, DO_SAVE=0, DO_REPLAY=0, DO_REWIND=0, DO_SCRUBBING=0, };
 
 	const char replay_filename[] = "./replay_file.bin";
 
@@ -1784,6 +1784,301 @@ static void tick(State* state, Input* input, signed long long time_us)
 		state->redraw_requested = 1;
 }
 
+typedef int(*DebugSprintf)(int indent, char*, const void*, const void*);
+
+int sprintfIndent(int indent, char* buffer)
+{
+	return sprintf(buffer, "%s", "\t\t\t\t\t\t\t\t\t\t" + 10 - indent);
+}
+
+int sprintfSingle(int indent, char* buffer, const void* fmt, const void* ptr)
+{
+	return sprintf(buffer, (const char*)fmt, *(long long*)ptr);
+}
+
+int sprintfFloat(int indent, char* buffer, const void* fmt, const void* ptr)
+{
+	return sprintf(buffer, (const char*)fmt, *(float*)ptr);
+}
+
+int sprintfDouble(int indent, char* buffer, const void* fmt, const void* ptr)
+{
+	char* original = buffer;
+	buffer += sprintfIndent(indent, buffer);
+	buffer += sprintf(buffer, (const char*)fmt, *(double*)ptr);
+	return buffer - original;
+}
+
+#define GET_PRINTF_FUNC(x) _Generic((x), \
+	State*: sprintfState, \
+	Tetris: sprintfTetris, \
+	TetrisPiece: sprintfTetrisPiece, \
+	float: sprintfFloat, \
+	double: sprintfDouble, \
+	default: sprintfSingle \
+)
+
+#define GET_USER_PTR(x) _Generic((x), \
+	State*: 0, \
+	Tetris*: 0, \
+	TetrisPiece*: 0, \
+	default: GET_FMT_STRING(x))
+
+#define GET_FMT_STRING(x) (_Generic((x), \
+	char: "%c", \
+	unsigned char: "%hhu", \
+	short: "%hd", \
+	unsigned short: "%hu", \
+	unsigned: "%u", \
+	int: "%d", \
+	float: "%f", \
+	double: "%f", \
+	char*: "%s", \
+	void*: "%p", \
+	default: "%p"))
+
+#define VAR(var) \
+	do { \
+		DebugSprintf f = GET_PRINTF_FUNC(owner->var); \
+		void* user_ptr = GET_USER_PTR(owner->var); \
+		buffer += sprintfIndent(indent + 1, buffer); \
+		buffer += sprintf(buffer, #var " = "); \
+		buffer += f(indent + 1, buffer, user_ptr, &owner->var); \
+		buffer += sprintf(buffer, ",\n"); \
+	} while(0)
+
+#define STRUCT(Struct, VARS) \
+int sprintf ## Struct(int indent, char *buffer, const void* user_ptr, const void* ptr) \
+{ \
+	const Struct* owner = (const Struct*)ptr; \
+	const char* original = buffer; \
+	buffer += sprintf(buffer, #Struct " [0x%llX] {\n", ptr); \
+	VARS(VAR); \
+	buffer += sprintfIndent(indent, buffer); \
+	buffer += sprintf(buffer, "}"); \
+	return buffer - original; \
+}
+
+#define TETRIS_PIECE_VARS(X) \
+	X(type); \
+	X(rotation); \
+	X(x); \
+	X(y)
+STRUCT(TetrisPiece, TETRIS_PIECE_VARS)
+
+#define TETRIS_VARS(X) \
+	X(magic_number); \
+	X(current_piece); \
+	X(board); \
+	X(lines_cleared); \
+	X(score); \
+	X(current_time_us); \
+	X(fall_timer); \
+	X(game_over)
+STRUCT(Tetris, TETRIS_VARS)
+
+#define STATE_VARS(X) \
+	X(x); \
+	X(y); \
+	X(tick); \
+	X(hWnd); \
+	X(initialized); \
+	X(redraw_requested); \
+	X(old_window_proc); \
+	X(tetris)
+STRUCT(State, STATE_VARS)
+
+typedef struct
+{
+	char buffer[64];
+	const void* address;
+	DebugSprintf sprintf_func;
+	const void* user_ptr;
+} Variable;
+
+typedef struct
+{
+	Variable variables[64];
+	int count;
+} Scope;
+
+typedef struct
+{
+	Scope* scope;
+	int depth;
+} LocalScope;
+
+typedef struct
+{
+	const char* file;
+	int line;
+} Location;
+
+typedef struct
+{
+	int depth;
+	Scope scope[64];
+
+	int breakpoint_count;
+	Location breakpoints[64];
+
+	Location current_location;
+	volatile int debug_paused;
+} Debugger;
+
+LocalScope begin_scope(Debugger* debugger)
+{
+	int depth = debugger->depth++;
+	LocalScope local_scope;
+	local_scope.depth = debugger->depth;
+	local_scope.scope = &debugger->scope[debugger->depth];
+	memset(local_scope.scope, 0, sizeof(*local_scope.scope));
+	return local_scope;
+}
+
+void end_scope(Debugger* debugger, LocalScope local_scope)
+{
+	debugger->depth = local_scope.depth - 1;
+}
+
+void push_variable(Scope* scope, const char* name, const void* address, DebugSprintf sprintf_func, const void* user_ptr)
+{
+	Variable* variable = 0;
+	for (int i = 0; i < scope->count; ++i)
+	{
+		if (strncmp(scope->variables[i].buffer, name, sizeof(scope->variables[i].buffer)) != 0)
+			continue;
+
+		variable = &scope->variables[i];
+		//printf("found %d %s\n", i, name);
+		break;
+	}
+	if (variable == 0)
+	{
+		variable = &scope->variables[scope->count++];
+		//printf("added %d %s '%s'\n", scope->count - 1, name, user_ptr);
+	}
+	strcpy(variable->buffer, name);
+	variable->address = address;
+	variable->sprintf_func = sprintf_func;
+	variable->user_ptr = user_ptr;
+}
+
+int sprintf_value_impl(char* buffer, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
+{
+	char* output = buffer;
+	output += sprintf_func(0, output, user_ptr, address);
+	return output - buffer;
+}
+
+void print_variable(const char* name, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
+{
+	char buffer[512] = {0};
+	sprintf_value_impl(buffer, sprintf_func, user_ptr, address);
+	printf("%s = %s\n", name, buffer);
+}
+
+#define PRINT_VARIABLE(var) do { print_variable(#var, GET_PRINTF_FUNC(var), GET_USER_PTR(var), &(var)); } while(0)
+#define PRINT_VARIABLE_POINTER(var) do { print_variable(#var, GET_PRINTF_FUNC(var), GET_USER_PTR(var), (var)); } while(0)
+
+void print_variable_from_scope(Scope* scope, const char* name)
+{
+	char buffer[512] = {0};
+	char* output = buffer;
+	for (int i = 0; i < scope->count; ++i)
+	{
+		if (strcmp(scope->variables[i].buffer, name) != 0)
+			continue;
+		Variable v = scope->variables[i];
+		output += sprintf_value_impl(buffer, v.sprintf_func, v.user_ptr, v.address);
+		printf("%s = %s\n", name, buffer);
+		return;
+	}
+	printf("'%s' variable doesn't exist in scope", name);
+}
+
+void debug_pause(Debugger* debugger)
+{
+	debugger->debug_paused = 1;
+	while (debugger->debug_paused)
+		Sleep(1);
+}
+
+void unpause(Debugger* debugger)
+{
+	debugger->debug_paused = 0;
+}
+
+void conditional_breakpoint(Debugger* debugger, const char* file, int line)
+{
+	for (int i = 0; i < debugger->breakpoint_count; ++i)
+	{
+		if (debugger->breakpoints[i].line != line)
+			continue;
+
+		if (strcmp(debugger->breakpoints[i].file, file) != 0)
+			continue;
+
+		debugger->current_location.file = file;
+		debugger->current_location.line = line;
+		debug_pause(debugger);
+	}
+}
+
+Debugger g_debugger = {0};
+
+#define INSTRUMENT_VARIABLE(var) do { push_variable(local_scope.scope, #var, &(var), GET_PRINTF_FUNC(var), GET_USER_PTR(var)); } while(0)
+#define INSTRUMENT_POINTER(var) do { push_variable(local_scope.scope, #var, (var), GET_PRINTF_FUNC(var), GET_USER_PTR(var)); } while(0)
+
+void inner_func()
+{
+	LocalScope local_scope = begin_scope(&g_debugger);
+
+	int i = 0;
+	for (i = 0; i < 12; ++i)
+	{
+		//INSTRUMENT_VARIABLE(i);
+	}
+
+	//print_variable_from_scope(local_scope.scope, "i");
+	end_scope(&g_debugger, local_scope);
+}
+
+void print_var()
+{
+	
+}
+
+void instrument_test(State* state)
+{
+	LocalScope local_scope = begin_scope(&g_debugger);
+	char c = 'b';
+	short sh = -1234;
+	float f = 123.456f;
+	double dbl = 123.456;
+
+	INSTRUMENT_VARIABLE(c);
+	//INSTRUMENT_VARIABLE(sh);
+	//INSTRUMENT_VARIABLE(state);
+	INSTRUMENT_POINTER(state);
+	INSTRUMENT_VARIABLE(state->x);
+	INSTRUMENT_VARIABLE(state->tick);
+	//INSTRUMENT_VARIABLE(f);
+	//INSTRUMENT_VARIABLE(dbl);
+	print_variable_from_scope(local_scope.scope, "c");
+	//print_variable_from_scope(local_scope.scope, "sh");
+	print_variable_from_scope(local_scope.scope, "state");
+	print_variable_from_scope(local_scope.scope, "state->x");
+	print_variable_from_scope(local_scope.scope, "state->tick");
+	//print_variable_from_scope(local_scope.scope, "f");
+	//print_variable_from_scope(local_scope.scope, "dbl");
+
+	inner_func();
+	end_scope(&g_debugger, local_scope);
+
+	//Sleep(500);
+}
+
 void update(Communication* communication)
 {
 	verbose_printf("update, ");
@@ -1796,9 +2091,15 @@ void update(Communication* communication)
 
 	setup(state, input);
 
+	//instrument_test(state);
+	//PRINT_VARIABLE(state);
+
 	state->tick += 1;
 	if (state->tick % 100 == 0 && !communication->ghost_frame)
+	{
 		printf("update(%5d)\n", state->tick);
+		PRINT_VARIABLE_POINTER(state);
+	}
 
 	tick(state, input, communication->time_us);
 
