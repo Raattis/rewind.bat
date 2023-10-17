@@ -84,8 +84,8 @@ if not exist %compiler_executable% (
 	echo #line 0 "%~n0%~x0"
 	echo #if GOTO_BOOTSTRAP_BUILDER
 	type %~n0%~x0
-) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
-@rem ) | %compiler_executable% -o %~n0.exe  -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench - 
+) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
+@rem ) | %compiler_executable% -o %~n0.exe  -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
 
 echo.
 
@@ -490,7 +490,7 @@ void rect(Drawer* drawer, int x, int y, int w, int h, int r, int g, int b)
 	if (success < 0)
 		fprintf(stderr, "Failed to draw a rectangle. (%d, %d, %d, %d)", x,y, w,h);
 	DeleteObject(brush);
-	
+
 	verbose_func_end();
 }
 
@@ -566,12 +566,12 @@ LRESULT window_message_handler_no_input_impl(HWND hWnd, UINT message, WPARAM wPa
 			communication.user_buffer = message_handling_data->user_buffer;
 
 			Drawer_Funcs drawer_funcs = {
-				.get_screen_width_and_height = &get_screen_width_and_height,
-				.rect = &rect,
-				.text = &text,
-				.fill = &fill,
-				.pixel = &pixel,
-				.text_w = &text_w,
+				.get_screen_width_and_height = (void*)&get_screen_width_and_height,
+				.rect = (void*)&rect,
+				.text = (void*)&text,
+				.fill = (void*)&fill,
+				.pixel = (void*)&pixel,
+				.text_w = (void*)&text_w,
 			};
 
 			Drawer drawer;
@@ -878,7 +878,7 @@ int simulate_ghost_tick(void* user_buffer, int user_buffer_size, const struct Ti
 	communication.ghost_frame = 1;
 
 	Update_Func update_func = (Update_Func)(program_buffer_start + tick->update_func_offset);
-	
+
 	verbose_printf("calling update_func %p, ", update_func);
 
 	update_func(&communication);
@@ -916,7 +916,7 @@ void paint_tick(HWND hWnd, void* user_buffer, const struct Tick_Data* tick, cons
 	if (tick->redraw_requested)
 		RedrawWindow(hWnd, NULL, NULL, RDW_INVALIDATE); // Add "|RDW_ERASE" to see the flicker that is currently hidden by double buffering the draw target.
 
-	g_debug_program_buffer = program_buffer_start;
+	g_debug_program_buffer = (void*)program_buffer_start;
 	Paint_Func paint_func = (void*)program_buffer_start + tick->paint_func_offset;
 	poll_repaint(hWnd, paint_func, user_buffer);
 }
@@ -1500,7 +1500,7 @@ Execution_Buffers create_execution_buffers()
 	Execution_Buffers execution_buffers;
 	execution_buffers.program_buffer_size = 4 * 1024 * 1024; // Roughly space for 100 recompiles
 	execution_buffers.state_stride = 100;
-	execution_buffers.state_max_count = 16 * 1024; 
+	execution_buffers.state_max_count = 16 * 1024;
 	execution_buffers.tick_max_count = execution_buffers.state_max_count;
 
 	void* malloc(size_t);
@@ -1775,7 +1775,7 @@ static void setup(State* state, Input* input)
 static void tick(State* state, Input* input, signed long long time_us)
 {
 	verbose_printf("tick(%lld), ", time_us);
-	
+
 	// Modify these, save and note the cross in the window being painted to a different spot
 	state->x = 200;
 	state->y = 100;
@@ -1788,7 +1788,7 @@ typedef int(*DebugSprintf)(int indent, char*, const void*, const void*);
 
 int sprintfIndent(int indent, char* buffer)
 {
-	return sprintf(buffer, "%s", "\t\t\t\t\t\t\t\t\t\t" + 10 - indent);
+	return sprintf(buffer, "%s", "                      " + 20 - indent * 2);
 }
 
 int sprintfSingle(int indent, char* buffer, const void* fmt, const void* ptr)
@@ -1831,7 +1831,9 @@ int sprintfDouble(int indent, char* buffer, const void* fmt, const void* ptr)
 	float: "%f", \
 	double: "%f", \
 	char*: "%s", \
+	const char*: "%s", \
 	void*: "%p", \
+	const void*: "%p", \
 	default: "%p"))
 
 #define VAR(var) \
@@ -1891,18 +1893,22 @@ typedef struct
 	const void* address;
 	DebugSprintf sprintf_func;
 	const void* user_ptr;
+	int assignment_line;
 } Variable;
 
 typedef struct
 {
 	Variable variables[64];
 	int count;
+	const char* function;
+	const char* file;
+	int line;
+	int depth;
 } Scope;
 
 typedef struct
 {
 	Scope* scope;
-	int depth;
 } LocalScope;
 
 typedef struct
@@ -1923,22 +1929,37 @@ typedef struct
 	volatile int debug_paused;
 } Debugger;
 
-LocalScope begin_scope(Debugger* debugger)
+
+LocalScope push_scope(Debugger* debugger, const char* function, const char* file, int line)
 {
 	int depth = debugger->depth++;
+
 	LocalScope local_scope;
-	local_scope.depth = debugger->depth;
-	local_scope.scope = &debugger->scope[debugger->depth];
+	local_scope.scope = &debugger->scope[depth];
 	memset(local_scope.scope, 0, sizeof(*local_scope.scope));
+
+	Scope* scope = local_scope.scope;
+	scope->function = function;
+	scope->file = file;
+	scope->line = line;
+	scope->depth = depth;
 	return local_scope;
 }
 
-void end_scope(Debugger* debugger, LocalScope local_scope)
+void pop_scope(Debugger* debugger, LocalScope local_scope)
 {
-	debugger->depth = local_scope.depth - 1;
+	debugger->depth = local_scope.scope->depth;
+	FATAL(debugger->depth >= 0, "%d depth", debugger->depth);
+	memset(local_scope.scope, 0, sizeof(*local_scope.scope));
 }
 
-void push_variable(Scope* scope, const char* name, const void* address, DebugSprintf sprintf_func, const void* user_ptr)
+Scope* get_scope(Debugger* debugger)
+{
+	FATAL(debugger->depth >= 0, "%d depth", debugger->depth);
+	return &debugger->scope[debugger->depth];
+}
+
+void push_variable(Scope* scope, const char* name, const void* address, DebugSprintf sprintf_func, const void* user_ptr, int line)
 {
 	Variable* variable = 0;
 	for (int i = 0; i < scope->count; ++i)
@@ -1947,18 +1968,17 @@ void push_variable(Scope* scope, const char* name, const void* address, DebugSpr
 			continue;
 
 		variable = &scope->variables[i];
-		//printf("found %d %s\n", i, name);
 		break;
 	}
 	if (variable == 0)
 	{
 		variable = &scope->variables[scope->count++];
-		//printf("added %d %s '%s'\n", scope->count - 1, name, user_ptr);
 	}
 	strcpy(variable->buffer, name);
 	variable->address = address;
 	variable->sprintf_func = sprintf_func;
 	variable->user_ptr = user_ptr;
+	variable->assignment_line = line;
 }
 
 int sprintf_value_impl(char* buffer, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
@@ -1998,7 +2018,7 @@ void debug_pause(Debugger* debugger)
 {
 	debugger->debug_paused = 1;
 	while (debugger->debug_paused)
-		Sleep(1);
+		Sleep(5);
 }
 
 void unpause(Debugger* debugger)
@@ -2006,7 +2026,7 @@ void unpause(Debugger* debugger)
 	debugger->debug_paused = 0;
 }
 
-void conditional_breakpoint(Debugger* debugger, const char* file, int line)
+void location_breakpoint(Debugger* debugger, const char* file, int line)
 {
 	for (int i = 0; i < debugger->breakpoint_count; ++i)
 	{
@@ -2022,58 +2042,69 @@ void conditional_breakpoint(Debugger* debugger, const char* file, int line)
 	}
 }
 
+void print_scope(Scope* scope)
+{
+	printf("%s:%d scope: %s (%d) {\n", scope->file, scope->line, scope->function, scope->depth);
+
+	char buffer[1024] = {0};
+	for (int i = 0; i < scope->count; ++i)
+	{
+		char* output = buffer;
+		Variable v = scope->variables[i];
+		output += sprintf_value_impl(output, v.sprintf_func, v.user_ptr, v.address);
+		printf("%s = %s\n", v.buffer, buffer);
+	}
+	printf("}\n");
+}
+
+void print_stack(Debugger* debugger)
+{
+	for (int i = 0; i < debugger->depth; ++i)
+	{
+		print_scope(&debugger->scope[i]);
+	}
+}
+
 Debugger g_debugger = {0};
 
-#define INSTRUMENT_VARIABLE(var) do { push_variable(local_scope.scope, #var, &(var), GET_PRINTF_FUNC(var), GET_USER_PTR(var)); } while(0)
-#define INSTRUMENT_POINTER(var) do { push_variable(local_scope.scope, #var, (var), GET_PRINTF_FUNC(var), GET_USER_PTR(var)); } while(0)
+#define INSTRUMENT_VARIABLE(var) do { push_variable(get_scope(&g_debugger), #var, &(var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
+#define INSTRUMENT_POINTER(var) do { push_variable(get_scope(&g_debugger), #var, (var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
+#define SCOPE_BEGIN_IMPL(func, id) LocalScope local_scope_##id= push_scope(&g_debugger, func, __FILE__, __LINE__)
+#define SCOPE_BEGIN() SCOPE_BEGIN_IMPL(__FUNCTION__, 0)
+#define SCOPE_END_IMPL(id) pop_scope(&g_debugger, local_scope_##id)
+#define SCOPE_END() SCOPE_END_IMPL(0)
+
+#define SCOPE_CALL_RET(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); auto ret = x; SCOPE_END_IMPL(__LINE__); ret; })
+#define SCOPE_CALL(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); x; SCOPE_END_IMPL(__LINE__); })
 
 void inner_func()
 {
-	LocalScope local_scope = begin_scope(&g_debugger);
-
 	int i = 0;
 	for (i = 0; i < 12; ++i)
 	{
-		//INSTRUMENT_VARIABLE(i);
+		INSTRUMENT_VARIABLE(i);
 	}
 
-	//print_variable_from_scope(local_scope.scope, "i");
-	end_scope(&g_debugger, local_scope);
+	print_scope(get_scope(&g_debugger));
 }
 
-void print_var()
+const char* instrument_test(State* state, int a, int b)
 {
-	
-}
-
-void instrument_test(State* state)
-{
-	LocalScope local_scope = begin_scope(&g_debugger);
-	char c = 'b';
-	short sh = -1234;
-	float f = 123.456f;
-	double dbl = 123.456;
-
-	INSTRUMENT_VARIABLE(c);
-	//INSTRUMENT_VARIABLE(sh);
-	//INSTRUMENT_VARIABLE(state);
 	INSTRUMENT_POINTER(state);
-	INSTRUMENT_VARIABLE(state->x);
-	INSTRUMENT_VARIABLE(state->tick);
-	//INSTRUMENT_VARIABLE(f);
-	//INSTRUMENT_VARIABLE(dbl);
-	print_variable_from_scope(local_scope.scope, "c");
-	//print_variable_from_scope(local_scope.scope, "sh");
-	print_variable_from_scope(local_scope.scope, "state");
-	print_variable_from_scope(local_scope.scope, "state->x");
-	print_variable_from_scope(local_scope.scope, "state->tick");
-	//print_variable_from_scope(local_scope.scope, "f");
-	//print_variable_from_scope(local_scope.scope, "dbl");
+	INSTRUMENT_VARIABLE(a);
+	INSTRUMENT_VARIABLE(b);
+	char c = 'b'; INSTRUMENT_VARIABLE(c);
+	short sh = -1234; INSTRUMENT_VARIABLE(sh);
+	float f = 123.456f; INSTRUMENT_VARIABLE(f);
+	double dbl = 123.456; INSTRUMENT_VARIABLE(dbl);
 
-	inner_func();
-	end_scope(&g_debugger, local_scope);
+	printf("sizeof(inner_func()) %lld\n", sizeof(inner_func()));
 
-	//Sleep(500);
+	SCOPE_CALL(inner_func());
+	print_scope(get_scope(&g_debugger));
+
+
+	return "hi";
 }
 
 void update(Communication* communication)
@@ -2088,14 +2119,15 @@ void update(Communication* communication)
 
 	setup(state, input);
 
-	//instrument_test(state);
-	//PRINT_VARIABLE(state);
-
 	state->tick += 1;
-	if (state->tick % 100 == 0 && !communication->ghost_frame)
+	if (state->tick % 30 == 0 && !communication->ghost_frame)
 	{
 		printf("update(%5d)\n", state->tick);
-		PRINT_VARIABLE_POINTER(state);
+
+		LocalScope local_scope = push_scope(&g_debugger, "test", __FILE__, __LINE__);
+		const char* result = instrument_test(state, 0, 1);
+		print_stack(&g_debugger);
+		pop_scope(&g_debugger, local_scope);
 	}
 
 	tick(state, input, communication->time_us);
