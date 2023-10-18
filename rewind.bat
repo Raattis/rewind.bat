@@ -79,13 +79,16 @@ if not exist %compiler_executable% (
 	echo Tiny C Compiler Acquired!
 )
 
+del %~n0.exe
+
 (
 	echo static const char* b_source_filename = "%~n0%~x0";
 	echo #line 0 "%~n0%~x0"
 	echo #if GOTO_BOOTSTRAP_BUILDER
 	type %~n0%~x0
-) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
-@rem ) | %compiler_executable% -o %~n0.exe  -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
+) | %compiler_executable% -o%~n0.exe -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
+@rem ) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
+@rem ) | %compiler_executable% -o%~n0.exe -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Ltcc/libtcc -llibtcc -Itcc/include -Itcc/include/winapi -Itcc/libtcc -DSHARED_PREFIX -DSOURCE -bench -
 
 echo.
 
@@ -106,6 +109,8 @@ if %errorlevel% == 0 (
 		)
 	)
 )
+
+@%~n0.exe
 
 :end
 exit errorlevel
@@ -1675,6 +1680,7 @@ enum { TRACE_PAINT=0&&TRACE };
 #define paint_printf(...) do { if (TRACE_PAINT) printf(__VA_ARGS__); } while(0)
 
 #include "tetris.h"
+#include "debugger.h"
 
 typedef struct
 {
@@ -1784,80 +1790,6 @@ static void tick(State* state, Input* input, signed long long time_us)
 		state->redraw_requested = 1;
 }
 
-typedef int(*DebugSprintf)(int indent, char*, const void*, const void*);
-
-int sprintfIndent(int indent, char* buffer)
-{
-	return sprintf(buffer, "%s", "                      " + 20 - indent * 2);
-}
-
-int sprintfSingle(int indent, char* buffer, const void* fmt, const void* ptr)
-{
-	return sprintf(buffer, (const char*)fmt, *(long long*)ptr);
-}
-
-int sprintfFloat(int indent, char* buffer, const void* fmt, const void* ptr)
-{
-	return sprintf(buffer, (const char*)fmt, *(float*)ptr);
-}
-
-int sprintfDouble(int indent, char* buffer, const void* fmt, const void* ptr)
-{
-	return sprintf(buffer, (const char*)fmt, *(double*)ptr);
-}
-
-#define GET_PRINTF_FUNC(x) _Generic((x), \
-	State*: sprintfState, \
-	Tetris: sprintfTetris, \
-	TetrisPiece: sprintfTetrisPiece, \
-	float: sprintfFloat, \
-	double: sprintfDouble, \
-	default: sprintfSingle \
-)
-
-#define GET_USER_PTR(x) _Generic((x), \
-	State*: 0, \
-	Tetris*: 0, \
-	TetrisPiece*: 0, \
-	default: GET_FMT_STRING(x))
-
-#define GET_FMT_STRING(x) (_Generic((x), \
-	char: "%c", \
-	unsigned char: "%hhu", \
-	short: "%hd", \
-	unsigned short: "%hu", \
-	unsigned: "%u", \
-	int: "%d", \
-	float: "%f", \
-	double: "%f", \
-	char*: "%s", \
-	const char*: "%s", \
-	void*: "%p", \
-	const void*: "%p", \
-	default: "%p"))
-
-#define VAR(var) \
-	do { \
-		DebugSprintf f = GET_PRINTF_FUNC(owner->var); \
-		void* user_ptr = GET_USER_PTR(owner->var); \
-		buffer += sprintfIndent(indent + 1, buffer); \
-		buffer += sprintf(buffer, #var " = "); \
-		buffer += f(indent + 1, buffer, user_ptr, &owner->var); \
-		buffer += sprintf(buffer, ",\n"); \
-	} while(0)
-
-#define STRUCT(Struct, VARS) \
-int sprintf ## Struct(int indent, char *buffer, const void* user_ptr, const void* ptr) \
-{ \
-	const Struct* owner = (const Struct*)ptr; \
-	const char* original = buffer; \
-	buffer += sprintf(buffer, #Struct " [0x%llX] {\n", ptr); \
-	VARS(VAR); \
-	buffer += sprintfIndent(indent, buffer); \
-	buffer += sprintf(buffer, "}"); \
-	return buffer - original; \
-}
-
 #define TETRIS_PIECE_VARS(X) \
 	X(type); \
 	X(rotation); \
@@ -1886,196 +1818,6 @@ STRUCT(Tetris, TETRIS_VARS)
 	X(old_window_proc); \
 	X(tetris)
 STRUCT(State, STATE_VARS)
-
-typedef struct
-{
-	char buffer[64];
-	const void* address;
-	DebugSprintf sprintf_func;
-	const void* user_ptr;
-	int assignment_line;
-} Variable;
-
-typedef struct
-{
-	Variable variables[64];
-	int count;
-	const char* function;
-	const char* file;
-	int line;
-	int depth;
-} Scope;
-
-typedef struct
-{
-	Scope* scope;
-} LocalScope;
-
-typedef struct
-{
-	const char* file;
-	int line;
-} Location;
-
-typedef struct
-{
-	int depth;
-	Scope scope[64];
-
-	int breakpoint_count;
-	Location breakpoints[64];
-
-	Location current_location;
-	volatile int debug_paused;
-} Debugger;
-
-
-LocalScope push_scope(Debugger* debugger, const char* function, const char* file, int line)
-{
-	int depth = debugger->depth++;
-
-	LocalScope local_scope;
-	local_scope.scope = &debugger->scope[depth];
-	memset(local_scope.scope, 0, sizeof(*local_scope.scope));
-
-	Scope* scope = local_scope.scope;
-	scope->function = function;
-	scope->file = file;
-	scope->line = line;
-	scope->depth = depth;
-	return local_scope;
-}
-
-void pop_scope(Debugger* debugger, LocalScope local_scope)
-{
-	debugger->depth = local_scope.scope->depth;
-	FATAL(debugger->depth >= 0, "%d depth", debugger->depth);
-	memset(local_scope.scope, 0, sizeof(*local_scope.scope));
-}
-
-Scope* get_scope(Debugger* debugger)
-{
-	FATAL(debugger->depth >= 0, "%d depth", debugger->depth);
-	return &debugger->scope[debugger->depth];
-}
-
-void push_variable(Scope* scope, const char* name, const void* address, DebugSprintf sprintf_func, const void* user_ptr, int line)
-{
-	Variable* variable = 0;
-	for (int i = 0; i < scope->count; ++i)
-	{
-		if (strncmp(scope->variables[i].buffer, name, sizeof(scope->variables[i].buffer)) != 0)
-			continue;
-
-		variable = &scope->variables[i];
-		break;
-	}
-	if (variable == 0)
-	{
-		variable = &scope->variables[scope->count++];
-	}
-	strcpy(variable->buffer, name);
-	variable->address = address;
-	variable->sprintf_func = sprintf_func;
-	variable->user_ptr = user_ptr;
-	variable->assignment_line = line;
-}
-
-int sprintf_value_impl(char* buffer, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
-{
-	char* output = buffer;
-	output += sprintf_func(0, output, user_ptr, address);
-	return output - buffer;
-}
-
-void print_variable(const char* name, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
-{
-	char buffer[512] = {0};
-	sprintf_value_impl(buffer, sprintf_func, user_ptr, address);
-	printf("%s = %s\n", name, buffer);
-}
-
-#define PRINT_VARIABLE(var) do { print_variable(#var, GET_PRINTF_FUNC(var), GET_USER_PTR(var), &(var)); } while(0)
-#define PRINT_VARIABLE_POINTER(var) do { print_variable(#var, GET_PRINTF_FUNC(var), GET_USER_PTR(var), (var)); } while(0)
-
-void print_variable_from_scope(Scope* scope, const char* name)
-{
-	char buffer[512] = {0};
-	char* output = buffer;
-	for (int i = 0; i < scope->count; ++i)
-	{
-		if (strcmp(scope->variables[i].buffer, name) != 0)
-			continue;
-		Variable v = scope->variables[i];
-		output += sprintf_value_impl(buffer, v.sprintf_func, v.user_ptr, v.address);
-		printf("%s = %s\n", name, buffer);
-		return;
-	}
-	printf("'%s' variable doesn't exist in scope", name);
-}
-
-void debug_pause(Debugger* debugger)
-{
-	debugger->debug_paused = 1;
-	while (debugger->debug_paused)
-		Sleep(5);
-}
-
-void unpause(Debugger* debugger)
-{
-	debugger->debug_paused = 0;
-}
-
-void location_breakpoint(Debugger* debugger, const char* file, int line)
-{
-	for (int i = 0; i < debugger->breakpoint_count; ++i)
-	{
-		if (debugger->breakpoints[i].line != line)
-			continue;
-
-		if (strcmp(debugger->breakpoints[i].file, file) != 0)
-			continue;
-
-		debugger->current_location.file = file;
-		debugger->current_location.line = line;
-		debug_pause(debugger);
-	}
-}
-
-void print_scope(Scope* scope)
-{
-	printf("%s:%d scope: %s (%d) {\n", scope->file, scope->line, scope->function, scope->depth);
-
-	char buffer[1024] = {0};
-	for (int i = 0; i < scope->count; ++i)
-	{
-		char* output = buffer;
-		Variable v = scope->variables[i];
-		output += sprintf_value_impl(output, v.sprintf_func, v.user_ptr, v.address);
-		printf("%s = %s\n", v.buffer, buffer);
-	}
-	printf("}\n");
-}
-
-void print_stack(Debugger* debugger)
-{
-	for (int i = 0; i < debugger->depth; ++i)
-	{
-		print_scope(&debugger->scope[i]);
-	}
-}
-
-Debugger g_debugger = {0};
-
-#define INSTRUMENT_VARIABLE(var) do { push_variable(get_scope(&g_debugger), #var, &(var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
-#define INSTRUMENT_POINTER(var) do { push_variable(get_scope(&g_debugger), #var, (var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
-#define SCOPE_BEGIN_IMPL(func, id) LocalScope local_scope_##id= push_scope(&g_debugger, func, __FILE__, __LINE__)
-#define SCOPE_BEGIN() SCOPE_BEGIN_IMPL(__FUNCTION__, 0)
-#define SCOPE_END_IMPL(id) pop_scope(&g_debugger, local_scope_##id)
-#define SCOPE_END() SCOPE_END_IMPL(0)
-
-#define SCOPE_CALL_RET(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); auto ret = x; SCOPE_END_IMPL(__LINE__); ret; })
-#define SCOPE_CALL(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); x; SCOPE_END_IMPL(__LINE__); })
 
 void inner_func()
 {
@@ -2110,6 +1852,9 @@ const char* instrument_test(State* state, int a, int b)
 void update(Communication* communication)
 {
 	verbose_printf("update, ");
+
+	printf("Hi!\n");
+	debug_pause(&g_debugger);
 
 	FATAL(sizeof(State) <= communication->user_buffer_size, "State is larger than the user_buffer. %lld <= %lld", sizeof(State), communication->user_buffer_size);
 	FATAL(sizeof(Input) <= communication->input_buffer_size, "Input is larger than the input_buffer. %lld <= %lld", sizeof(Input), communication->input_buffer_size);
