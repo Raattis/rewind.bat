@@ -79,16 +79,14 @@ if not exist %compiler_executable% (
 	echo Tiny C Compiler Acquired!
 )
 
-del %~n0.exe
-
 (
 	echo static const char* b_source_filename = "%~n0%~x0";
 	echo #line 0 "%~n0%~x0"
 	echo #if GOTO_BOOTSTRAP_BUILDER
 	type %~n0%~x0
-) | %compiler_executable% -o%~n0.exe -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
-@rem ) | %compiler_executable% -run -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
-@rem ) | %compiler_executable% -o%~n0.exe -nostdlib -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Ltcc/libtcc -llibtcc -Itcc/include -Itcc/include/winapi -Itcc/libtcc -DSHARED_PREFIX -DSOURCE -bench -
+) | %compiler_executable% -o%~n0.exe -DSHARED_PREFIX -DSOURCE -bench -Itcc/libtcc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Ltcc/libtcc -llibtcc -
+rem ) | %compiler_executable% -run -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
+
 
 echo.
 
@@ -110,7 +108,7 @@ if %errorlevel% == 0 (
 	)
 )
 
-@%~n0.exe
+%~n0.exe
 
 :end
 exit errorlevel
@@ -1300,7 +1298,8 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 
 			trace_printf("tcc_set_options \n");
 			//tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX -nostdlib -nostdinc -vv");
-			tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX -nostdlib -nostdinc");
+			//tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX -nostdlib -nostdinc");
+			tcc_set_options(s, "-DRUNTIME_LOOP -DSHARED_PREFIX");
 
 			trace_printf("tcc_add_include_path  \n");
 			tcc_add_include_path(s, "tcc/include");
@@ -1334,7 +1333,32 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 			//tcc_add_symbol(s, "text_w", text_w);
 
 			trace_printf("Compiling\n");
-			if (-1 == tcc_compile_string(s, source_buffer))
+			
+			/*
+			char original_path[4096];
+			if (getcwd(original_path, sizeof(original_path)) == 0)
+			{
+				fprintf(stderr, "Couldn't get working directory before compiling.\n");
+				continue;
+			}
+			
+			const char* path = "./tcc";
+			if (chdir(path) != 0)
+			{
+				fprintf(stderr, "ERROR: Couldn't move working directory from '%s' to '%s' before compiling.\n", original_path, path);
+				wait_for_change(&newest_file_timestamp, headers_and_sources);
+				continue;
+			}
+			*/
+			int compile_result = tcc_compile_string(s, source_buffer);
+			/*
+			if (chdir(original_path) != 0)
+			{
+				fprintf(stderr, "ERROR: Couldn't return working directory to '%s' from '%s' after compiling.\n", original_path, path);
+				continue;
+			}
+			*/
+			if (-1 == compile_result)
 			{
 				fprintf(stderr, "Failed to recompile '%s'.\n", b_source_filename);
 				wait_for_change(&newest_file_timestamp, headers_and_sources);
@@ -1503,7 +1527,7 @@ size_t get_execution_buffers_save_size(Execution_Buffers execution_buffers)
 Execution_Buffers create_execution_buffers()
 {
 	Execution_Buffers execution_buffers;
-	execution_buffers.program_buffer_size = 4 * 1024 * 1024; // Roughly space for 100 recompiles
+	execution_buffers.program_buffer_size = 64 * 1024 * 1024; // Space for around 100 recompiles
 	execution_buffers.state_stride = 100;
 	execution_buffers.state_max_count = 16 * 1024;
 	execution_buffers.tick_max_count = execution_buffers.state_max_count;
@@ -1849,13 +1873,21 @@ const char* instrument_test(State* state, int a, int b)
 	return "hi";
 }
 
+void test()
+{
+	DEBUG_LOCATION();
+	const char* str = "HI!"; INSTRUMENT_VARIABLE(str);
+	DEBUG_LOCATION();
+	DEBUG_BREAK();
+	DEBUG_LOCATION();
+}
+
 void update(Communication* communication)
 {
 	verbose_printf("update, ");
 
 	printf("Hi!\n");
-	debug_pause(&g_debugger);
-
+	
 	FATAL(sizeof(State) <= communication->user_buffer_size, "State is larger than the user_buffer. %lld <= %lld", sizeof(State), communication->user_buffer_size);
 	FATAL(sizeof(Input) <= communication->input_buffer_size, "Input is larger than the input_buffer. %lld <= %lld", sizeof(Input), communication->input_buffer_size);
 
@@ -1880,6 +1912,15 @@ void update(Communication* communication)
 	communication->redraw_requested = 0 != state->redraw_requested;
 	if (state->redraw_requested > 0)
 		state->redraw_requested--;
+
+	SCOPE_BEGIN();
+	DEBUG_LOCATION();
+	const char* str = SCOPE_CALL_RET("hiiiiiiiiiii\n"); INSTRUMENT_VARIABLE(str);
+	SCOPE_CALL(printf("%s", str));
+	DEBUG_LOCATION();
+	SCOPE_CALL(test());
+	DEBUG_LOCATION();
+	SCOPE_END();
 }
 
 #endif // RUNTIME_LOOP

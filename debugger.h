@@ -99,6 +99,7 @@ typedef struct
 
 typedef struct
 {
+	const char* content;
 	const char* file;
 	int line;
 } Location;
@@ -108,7 +109,6 @@ typedef struct
 	int depth;
 	Scope scope[64];
 
-	int breakpoint_count;
 	Location breakpoints[64];
 
 	Location current_location;
@@ -120,7 +120,7 @@ typedef struct
 
 LocalScope push_scope(Debugger* debugger, const char* function, const char* file, int line)
 {
-	int depth = debugger->depth++;
+	int depth = ++debugger->depth;
 
 	LocalScope local_scope;
 	local_scope.scope = &debugger->scope[depth];
@@ -137,13 +137,13 @@ LocalScope push_scope(Debugger* debugger, const char* function, const char* file
 void pop_scope(Debugger* debugger, LocalScope local_scope)
 {
 	debugger->depth = local_scope.scope->depth;
-	FATAL(debugger->depth >= 0, "%d depth", debugger->depth);
+	FATAL(debugger->depth > 0, "%d depth", debugger->depth);
 	memset(local_scope.scope, 0, sizeof(*local_scope.scope));
 }
 
 Scope* get_scope(Debugger* debugger)
 {
-	FATAL(debugger->depth >= 0, "%d depth", debugger->depth);
+	FATAL(debugger->depth > 0, "%d depth", debugger->depth);
 	return &debugger->scope[debugger->depth];
 }
 
@@ -202,13 +202,62 @@ void print_variable_from_scope(Scope* scope, const char* name)
 	printf("'%s' variable doesn't exist in scope", name);
 }
 
-void debug_pause(Debugger* debugger)
+void print_scope(Scope* scope)
 {
-#define ERROR_AND_RETRY(p_error, ...) ({ printf("error: " p_error "\n", ##__VA_ARGS__); continue; })
-#define COMMAND(p_command) (strcmp(command, p_command) == 0)
+	printf("[%d] %s:%d scope: %s {\n", scope->depth, scope->file, scope->line, scope->function);
+
+	char buffer[1024] = {0};
+	for (int i = 0; i < scope->count; ++i)
+	{
+		char* output = buffer;
+		Variable v = scope->variables[i];
+		output += sprintf_value_impl(output, v.sprintf_func, v.user_ptr, v.address);
+		printf("%s = %s\n", v.buffer, buffer);
+	}
+	printf("}\n");
+}
+
+void print_stack(Debugger* debugger)
+{
+	for (int i = 1; i <= debugger->depth; ++i)
+	{
+		print_scope(&debugger->scope[i]);
+	}
+}
+
+void print_location(Location location)
+{
+	if (location.file)
+		printf("%s:%d '%s'\n", location.file, location.line, location.content);
+	else
+		printf("No location stored\n");
+}
+
+void debug_interactively(Debugger* debugger)
+{
+	print_location(debugger->current_location);
+	fflush(stdin);
+	char input[1024] = {0};
+	int input_length = 0;
+
 	while (1)
 	{
-		char input[1024] = {0};
+		memset(input, 0, sizeof(input));
+		input_length = 0;
+
+		printf("(debugger) ");
+		while (input_length < sizeof(input) && !strchr(input, '\n'))
+		{
+			if (fgets(input + input_length, sizeof(input) - input_length, stdin))
+				input_length += strlen(input + input_length);
+			Sleep(10);
+			input[input_length] = 0;
+			printf("%s\n", input);
+		}
+
+#define ERROR_AND_RETRY(p_error, ...) { fprintf(stderr, "error: " p_error "\n", ##__VA_ARGS__); continue; }
+#define COMMAND(p_command) (strcmp(command, p_command) == 0)
+
 		char command[20] = {0};
 		char arg1[260] = {0};
 		char arg2[260] = {0};
@@ -216,35 +265,26 @@ void debug_pause(Debugger* debugger)
 		int arg1_int = 0;
 		int arg2_int = 0;
 		int arg3_int = 0;
-
-		printf("(debugger) ");
-		fflush(stdin);
-		int input_length = 0;
-		fflush(stdin);
-		if (!fgets(input, sizeof(input), stdin))
-			ERROR_AND_RETRY("Invalid input '%s'", input);
-
 		int arg_count = sscanf(input, "%19s %s %s %s", command, arg1, arg2, arg3) - 1;
 		if (arg_count < 0)
-		{
-			printf("Invalid input '%s'\n", input);
-			continue;
-		}
-		if (arg_count > 0)
-			sscanf(arg1, "%d", arg1_int);
-		
-		if (arg_count > 1)
-			sscanf(arg2, "%d", arg2_int);
-		
-		if (arg_count > 2)
-			sscanf(arg3, "%d", arg3_int);
+			ERROR_AND_RETRY("Invalid input '%s'\n", input);
 
-		printf("COMMAND:'%s', 1:'%s'(%d), 2:'%s'(%d), 3:'%s'(%d)\n", command, arg1, arg1_int, arg2, arg2_int, arg3, arg3_int);
+		if (arg_count > 0)
+			sscanf(arg1, "%d", &arg1_int);
+
+		if (arg_count > 1)
+			sscanf(arg2, "%d", &arg2_int);
+
+		if (arg_count > 2)
+			sscanf(arg3, "%d", &arg3_int);
+
+		printf("RAW_INPUT:'%s', COMMAND:'%s', [%d] 1:'%s'(%d), 2:'%s'(%d), 3:'%s'(%d)\n", input, command, arg_count, arg1, arg1_int, arg2, arg2_int, arg3, arg3_int);
 
 		if (COMMAND("c") || COMMAND("continue"))
 		{
 			if (arg_count > 0)
 				ERROR_AND_RETRY("continue doesn't take arguments");
+			debugger->break_depth_or_below = -1;
 			return;
 		}
 		else if (COMMAND("ignore"))
@@ -260,6 +300,7 @@ void debug_pause(Debugger* debugger)
 		{
 			if (arg_count > 0)
 				ERROR_AND_RETRY("exit doesn't take arguments");
+			void exit(int);
 			exit(1);
 			continue;
 		}
@@ -273,7 +314,7 @@ void debug_pause(Debugger* debugger)
 					if (debugger->breakpoints[i].file == 0)
 						continue;
 
-					printf("Breakpoint %d at '%s:%d'", i, debugger->breakpoints[i].file, debugger->breakpoints[i].line);
+					printf("Breakpoint %d at '%s:%d'\n", i, debugger->breakpoints[i].file, debugger->breakpoints[i].line);
 				}
 				continue;
 			}
@@ -284,19 +325,21 @@ void debug_pause(Debugger* debugger)
 
 			const char* filepath = arg_count == 1 ? debugger->current_location.file : arg_count == 2 ? arg1 : arg2;
 			int needs_to_allocate_string = arg_count > 1;
-			
+
 			int breakpoint_index = arg_count == 3 ? arg1_int : -1;
 			if (breakpoint_index < 0 && arg_count == 3)
 				ERROR_AND_RETRY("'%s' is not valid breakpoint index", arg1);
 
 			if (breakpoint_index < 0)
 			{
+				breakpoint_index = 0;
 				for (int i = 0; i < bp_count; ++i)
 				{
 					if (debugger->breakpoints[i].file != 0)
 						continue;
 
 					breakpoint_index = i;
+					break;
 				}
 			}
 
@@ -307,13 +350,13 @@ void debug_pause(Debugger* debugger)
 				char* new_string = malloc(strlen(filepath) + 1); // @LEAK;
 				strcpy(new_string, filepath);
 				debugger->breakpoints[i].file = new_string;
-				
 			}
 			else
 			{
 				debugger->breakpoints[i].file = filepath;
 			}
-			printf("Breakpoint %d at '%s:%d'", i, debugger->breakpoints[i].file, debugger->breakpoints[i].line);
+			debugger->breakpoints[i].line = line_number;
+			printf("Breakpoint %d set to '%s:%d' '%s'\n", i, debugger->breakpoints[i].file, debugger->breakpoints[i].line);
 			continue;
 		}
 		else if (COMMAND("s") || COMMAND("step") || COMMAND("d") || COMMAND("down"))
@@ -331,9 +374,24 @@ void debug_pause(Debugger* debugger)
 			debugger->break_depth_or_below = debugger->depth - 1;
 			return;
 		}
+		else if (COMMAND("t") || COMMAND("trace"))
+		{
+			if (debugger->depth <= 0)
+				ERROR_AND_RETRY("no scopes");
+			printf("%s:%d\n", debugger->current_location.file, debugger->current_location.line);
+			print_stack(debugger);
+		}
+		else if (COMMAND("ls") || COMMAND("locals"))
+		{
+			if (debugger->depth <= 0)
+				ERROR_AND_RETRY("no current scopes");
+			print_scope(&debugger->scope[debugger->depth]);
+		}
 		else if (COMMAND("w") || COMMAND("where"))
 		{
-			//printf("%s:%d", debugger->current_location.file, debugger->current_location.line);
+			if (arg_count > 0)
+				ERROR_AND_RETRY("where doesn't take arguments");
+			print_location(debugger->current_location);
 		}
 		else
 		{
@@ -342,9 +400,24 @@ void debug_pause(Debugger* debugger)
 	}
 }
 
-void location_breakpoint(Debugger* debugger, const char* file, int line)
+void debug_break(Debugger* debugger, const char* content, const char* file, int line)
 {
-	for (int i = 0; i < debugger->breakpoint_count; ++i)
+	debugger->current_location.content = content;
+	debugger->current_location.file = file;
+	debugger->current_location.line = line;
+	debug_interactively(debugger);
+}
+
+void debug_location(Debugger* debugger, const char* content, const char* file, int line)
+{
+	if (get_scope(debugger)->depth < debugger->break_depth_or_below)
+	{
+		debug_break(debugger, content, file, line);
+		return;
+	}
+
+	int bp_count = sizeof(debugger->breakpoints) / sizeof(debugger->breakpoints[0]);
+	for (int i = 0; i < bp_count; ++i)
 	{
 		if (debugger->breakpoints[i].line != line)
 			continue;
@@ -352,43 +425,23 @@ void location_breakpoint(Debugger* debugger, const char* file, int line)
 		if (strcmp(debugger->breakpoints[i].file, file) != 0)
 			continue;
 
-		debugger->current_location.file = file;
-		debugger->current_location.line = line;
-		debug_pause(debugger);
-	}
-}
-
-void print_scope(Scope* scope)
-{
-	printf("%s:%d scope: %s (%d) {\n", scope->file, scope->line, scope->function, scope->depth);
-
-	char buffer[1024] = {0};
-	for (int i = 0; i < scope->count; ++i)
-	{
-		char* output = buffer;
-		Variable v = scope->variables[i];
-		output += sprintf_value_impl(output, v.sprintf_func, v.user_ptr, v.address);
-		printf("%s = %s\n", v.buffer, buffer);
-	}
-	printf("}\n");
-}
-
-void print_stack(Debugger* debugger)
-{
-	for (int i = 0; i < debugger->depth; ++i)
-	{
-		print_scope(&debugger->scope[i]);
+		debug_break(debugger, content, file, line);
 	}
 }
 
 #define INSTRUMENT_VARIABLE(var) do { push_variable(get_scope(&g_debugger), #var, &(var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
 #define INSTRUMENT_POINTER(var) do { push_variable(get_scope(&g_debugger), #var, (var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
-#define SCOPE_BEGIN_IMPL(func, id) LocalScope local_scope_##id= push_scope(&g_debugger, func, __FILE__, __LINE__)
-#define SCOPE_BEGIN() SCOPE_BEGIN_IMPL(__FUNCTION__, 0)
+#define SCOPE_BEGIN_IMPL(func, id) LocalScope local_scope_##id = push_scope(&g_debugger, func, __FILE__, __LINE__)
 #define SCOPE_END_IMPL(id) pop_scope(&g_debugger, local_scope_##id)
+
+#define SCOPE_BEGIN() SCOPE_BEGIN_IMPL(__FUNCTION__, 0)
 #define SCOPE_END() SCOPE_END_IMPL(0)
 
-#define SCOPE_CALL_RET(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); auto ret = x; SCOPE_END_IMPL(__LINE__); ret; })
-#define SCOPE_CALL(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); x; SCOPE_END_IMPL(__LINE__); })
+#define SCOPE_CALL_RET(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); auto _ret = x; DEBUG_ROW(#x); SCOPE_END_IMPL(__LINE__); _ret; })
+#define SCOPE_CALL(x) do { SCOPE_BEGIN_IMPL(#x, __LINE__); x; DEBUG_ROW(#x); SCOPE_END_IMPL(__LINE__); } while(0)
+
+#define DEBUG_BREAK() debug_break(&g_debugger, __FUNCTION__, __FILE__, __LINE__)
+#define DEBUG_LOCATION() debug_location(&g_debugger, __FUNCTION__, __FILE__, __LINE__)
+#define DEBUG_ROW(x) debug_location(&g_debugger, #x, __FILE__, __LINE__)
 
 Debugger g_debugger = {0};
