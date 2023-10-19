@@ -1333,7 +1333,7 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 			//tcc_add_symbol(s, "text_w", text_w);
 
 			trace_printf("Compiling\n");
-			
+
 			/*
 			char original_path[4096];
 			if (getcwd(original_path, sizeof(original_path)) == 0)
@@ -1341,7 +1341,7 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 				fprintf(stderr, "Couldn't get working directory before compiling.\n");
 				continue;
 			}
-			
+
 			const char* path = "./tcc";
 			if (chdir(path) != 0)
 			{
@@ -1704,7 +1704,6 @@ enum { TRACE_PAINT=0&&TRACE };
 #define paint_printf(...) do { if (TRACE_PAINT) printf(__VA_ARGS__); } while(0)
 
 #include "tetris.h"
-#include "debugger.h"
 
 typedef struct
 {
@@ -1722,6 +1721,42 @@ typedef struct
 
 	Tetris tetris;
 } State;
+
+#define DEBUG_USER_TYPES(X, SEP) \
+	X(State*, State, 0) SEP \
+	X(Tetris, Tetris, 0) SEP \
+	X(TetrisPiece, TetrisPiece, 0)
+
+#include "debugger.h"
+
+#define TETRIS_PIECE_VARS(X) \
+	X(type); \
+	X(rotation); \
+	X(x); \
+	X(y)
+dbg_struct(TetrisPiece, TETRIS_PIECE_VARS)
+
+#define TETRIS_VARS(X) \
+	X(magic_number); \
+	X(current_piece); \
+	X(board); \
+	X(lines_cleared); \
+	X(score); \
+	X(current_time_us); \
+	X(fall_timer); \
+	X(game_over)
+dbg_struct(Tetris, TETRIS_VARS)
+
+#define STATE_VARS(X) \
+	X(x); \
+	X(y); \
+	X(tick); \
+	X(hWnd); \
+	X(initialized); \
+	X(redraw_requested); \
+	X(old_window_proc); \
+	X(tetris)
+dbg_struct(State, STATE_VARS)
 
 enum { StateInitializedMagicNumber = 123456 };
 
@@ -1814,79 +1849,41 @@ static void tick(State* state, Input* input, signed long long time_us)
 		state->redraw_requested = 1;
 }
 
-#define TETRIS_PIECE_VARS(X) \
-	X(type); \
-	X(rotation); \
-	X(x); \
-	X(y)
-STRUCT(TetrisPiece, TETRIS_PIECE_VARS)
-
-#define TETRIS_VARS(X) \
-	X(magic_number); \
-	X(current_piece); \
-	X(board); \
-	X(lines_cleared); \
-	X(score); \
-	X(current_time_us); \
-	X(fall_timer); \
-	X(game_over)
-STRUCT(Tetris, TETRIS_VARS)
-
-#define STATE_VARS(X) \
-	X(x); \
-	X(y); \
-	X(tick); \
-	X(hWnd); \
-	X(initialized); \
-	X(redraw_requested); \
-	X(old_window_proc); \
-	X(tetris)
-STRUCT(State, STATE_VARS)
-
 void inner_func()
-{
-	int i = 0;
-	for (i = 0; i < 12; ++i)
-	{
-		INSTRUMENT_VARIABLE(i);
-	}
-
-	print_scope(get_scope(&g_debugger));
-}
+{ dbg_scp dbg_args(0);
+dbg_loc	int i = 0;
+dbg_loc	for (i = 0; i < 12; ++i)
+dbg_loc	{
+dbg_loc		dbg_var(i);
+dbg_loc	}
+dbg_loc dbg_scp_end }
 
 const char* instrument_test(State* state, int a, int b)
-{
-	DEBUG_POINTER(state);
-	DEBUG_VARIABLE(a);
-	DEBUG_VARIABLE(b);
-	char c = 'b'; DEBUG_VARIABLE(c);
-	short sh = -1234; DEBUG_VARIABLE(sh);
-	float f = 123.456f; DEBUG_VARIABLE(f);
-	double dbl = 123.456; DEBUG_VARIABLE(dbl);
+{dbg_scp dbg_args(3, (,state), (&,a), (&,b));
+dbg_loc	char c = 'b'; dbg_var(c);
+dbg_loc	short sh = -1234; dbg_var(sh);
+dbg_loc	float f = 123.456f; dbg_var(f);
+dbg_loc	double dbl = 123.456; dbg_var(dbl);
 
-	printf("sizeof(inner_func()) %lld\n", sizeof(inner_func()));
+dbg_loc	printf("sizeof(inner_func()) %lld\n", sizeof(inner_func()));
 
-	DEBUG_CALL(inner_func());
-	print_scope(get_scope(&g_debugger));
+dbg_loc	inner_func();
 
-	return "hi";
+dbg_loc dbg_scp_end return "hi";
 }
 
 void test()
-{
-	DEBUG_LOCATION();
-	const char* str = "HI!"; DEBUG_VARIABLE(str);
-	DEBUG_LOCATION();
-	DEBUG_BREAK();
-	DEBUG_LOCATION();
-}
+{dbg_scp dbg_args(0);
+dbg_loc	const char* str = "HI!"; dbg_var(str);
+dbg_loc	DEBUG_BREAK();
+dbg_loc}
 
 void update(Communication* communication)
 {
 	verbose_printf("update, ");
 
 	printf("Hi!\n");
-	
+
 	FATAL(sizeof(State) <= communication->user_buffer_size, "State is larger than the user_buffer. %lld <= %lld", sizeof(State), communication->user_buffer_size);
 	FATAL(sizeof(Input) <= communication->input_buffer_size, "Input is larger than the input_buffer. %lld <= %lld", sizeof(Input), communication->input_buffer_size);
 
@@ -1899,11 +1896,6 @@ void update(Communication* communication)
 	if (state->tick % 30 == 0 && !communication->ghost_frame)
 	{
 		printf("update(%5d)\n", state->tick);
-
-		LocalScope local_scope = push_scope(&g_debugger, "test", __FILE__, __LINE__);
-		const char* result = instrument_test(state, 0, 1);
-		print_stack(&g_debugger);
-		pop_scope(&g_debugger, local_scope);
 	}
 
 	tick(state, input, communication->time_us);
@@ -1912,11 +1904,11 @@ void update(Communication* communication)
 	if (state->redraw_requested > 0)
 		state->redraw_requested--;
 
-	DEBUG_SCOPE_BEGIN(); DEBUG_LOCATION();
-	const char* str = DEBUG_CALL_RET("hiiiiiiiiiii\n"); DEBUG_VARIABLE(str);
-	DEBUG_CALL(printf("%s", str)); DEBUG_LOCATION();
-	DEBUG_CALL(test()); DEBUG_LOCATION();
-	DEBUG_SCOPE_END();
-}
+dbg_scp
+dbg_loc	const char* str = "hiiiiiiiiiii\n";	dbg_var(str);
+dbg_loc	instrument_test(state, 0, 1);
+dbg_loc	printf("%s", str);
+dbg_loc	test();
+dbg_loc dbg_scp_end}
 
 #endif // RUNTIME_LOOP
