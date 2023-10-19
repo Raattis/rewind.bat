@@ -516,7 +516,7 @@ void debug_location(Debugger* debugger, _Debug_Local_Scope local_scope, int line
 
 	const char* file =  get_scope(debugger)->file;
 
-	if (local_scope.depth < debugger->break_depth_or_below)
+	if (local_scope.depth <= debugger->break_depth_or_below)
 	{
 		debug_break(debugger, file, line);
 		return;
