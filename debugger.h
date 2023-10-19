@@ -1,4 +1,7 @@
 
+enum { DEBUGGER_TRACE = 0&&TRACE };
+#define dbg_printf(...) do { if (DEBUGGER_TRACE) printf(__VA_ARGS__); } while(0)
+
 typedef int(*DebugSprintf)(int indent, char*, const void*, const void*);
 
 int sprintfIndent(int indent, char* buffer)
@@ -169,6 +172,48 @@ void push_variable(Scope* scope, const char* name, const void* address, DebugSpr
 	variable->assignment_line = line;
 }
 
+int sprint_lines(char* output, int buffer_len, const char* filename, int start, int count, int highlight)
+{
+	char* end = output + buffer_len;
+	
+	FILE* file = fopen(filename, "r");
+	FATAL(file, "'%s' doesn't exist", filename);
+
+	int lineno = 1;
+	while(start-- > 1 && fgets(output, buffer_len, file)) ++lineno;
+
+	while(count-- > 0)
+	{
+		const char* line_start = output;
+		if (lineno != highlight)
+			output += sprintf(output, "%5d ", lineno);
+		else
+			output += sprintf(output, "   -->");
+		FATAL(output < end, "Buffer overrun");
+
+		if (!fgets(output, end - output, file))
+		{
+			output = line_start;
+			*output = 0;
+			break;
+		}
+
+		output += strlen(output);
+		FATAL(output < end, "Buffer overrun");
+
+		++lineno;
+	}
+
+	fclose(file);
+}
+
+char g_temp_buffer[16 * 1024];
+int print_lines(const char* filename, int start, int count, int highlight)
+{
+	sprint_lines(g_temp_buffer, sizeof(g_temp_buffer), filename, start, count, highlight);
+	printf("%s", g_temp_buffer);
+}
+
 int sprintf_value_impl(char* buffer, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
 {
 	char* output = buffer;
@@ -233,9 +278,16 @@ void print_location(Location location)
 		printf("No location stored\n");
 }
 
+void do_command_ll(Debugger* debugger)
+{
+	print_lines(debugger->current_location.file, debugger->current_location.line - 10, 20, debugger->current_location.line);
+}
+
 void debug_interactively(Debugger* debugger)
 {
 	print_location(debugger->current_location);
+	do_command_ll(debugger);
+
 	fflush(stdin);
 	char input[1024] = {0};
 	int input_length = 0;
@@ -252,7 +304,7 @@ void debug_interactively(Debugger* debugger)
 				input_length += strlen(input + input_length);
 			Sleep(10);
 			input[input_length] = 0;
-			printf("%s\n", input);
+			dbg_printf("%s\n", input);
 		}
 
 #define ERROR_AND_RETRY(p_error, ...) { fprintf(stderr, "error: " p_error "\n", ##__VA_ARGS__); continue; }
@@ -278,7 +330,7 @@ void debug_interactively(Debugger* debugger)
 		if (arg_count > 2)
 			sscanf(arg3, "%d", &arg3_int);
 
-		printf("RAW_INPUT:'%s', COMMAND:'%s', [%d] 1:'%s'(%d), 2:'%s'(%d), 3:'%s'(%d)\n", input, command, arg_count, arg1, arg1_int, arg2, arg2_int, arg3, arg3_int);
+		dbg_printf("RAW_INPUT:'%s', COMMAND:'%s', [%d] 1:'%s'(%d), 2:'%s'(%d), 3:'%s'(%d)\n", input, command, arg_count, arg1, arg1_int, arg2, arg2_int, arg3, arg3_int);
 
 		if (COMMAND("c") || COMMAND("continue"))
 		{
@@ -362,16 +414,19 @@ void debug_interactively(Debugger* debugger)
 		else if (COMMAND("s") || COMMAND("step") || COMMAND("d") || COMMAND("down"))
 		{
 			debugger->break_depth_or_below = 999;
+			do_command_ll(debugger);
 			return;
 		}
 		else if (COMMAND("n") || COMMAND("next"))
 		{
 			debugger->break_depth_or_below = debugger->depth;
+			do_command_ll(debugger);
 			return;
 		}
 		else if (COMMAND("u") || COMMAND("up"))
 		{
 			debugger->break_depth_or_below = debugger->depth - 1;
+			do_command_ll(debugger);
 			return;
 		}
 		else if (COMMAND("t") || COMMAND("trace"))
@@ -392,6 +447,10 @@ void debug_interactively(Debugger* debugger)
 			if (arg_count > 0)
 				ERROR_AND_RETRY("where doesn't take arguments");
 			print_location(debugger->current_location);
+		}
+		else if (COMMAND("l") || COMMAND("ll"))
+		{
+			do_command_ll(debugger);
 		}
 		else
 		{
@@ -429,16 +488,16 @@ void debug_location(Debugger* debugger, const char* content, const char* file, i
 	}
 }
 
-#define INSTRUMENT_VARIABLE(var) do { push_variable(get_scope(&g_debugger), #var, &(var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
-#define INSTRUMENT_POINTER(var) do { push_variable(get_scope(&g_debugger), #var, (var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
-#define SCOPE_BEGIN_IMPL(func, id) LocalScope local_scope_##id = push_scope(&g_debugger, func, __FILE__, __LINE__)
-#define SCOPE_END_IMPL(id) pop_scope(&g_debugger, local_scope_##id)
+#define DEBUG_VARIABLE(var) do { push_variable(get_scope(&g_debugger), #var, &(var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
+#define DEBUG_POINTER(var) do { push_variable(get_scope(&g_debugger), #var, (var), GET_PRINTF_FUNC(var), GET_USER_PTR(var), __LINE__); } while(0)
+#define DEBUG_SCOPE_BEGIN_IMPL(func, id) LocalScope local_scope_##id = push_scope(&g_debugger, func, __FILE__, __LINE__)
+#define DEBUG_SCOPE_END_IMPL(id) pop_scope(&g_debugger, local_scope_##id)
 
-#define SCOPE_BEGIN() SCOPE_BEGIN_IMPL(__FUNCTION__, 0)
-#define SCOPE_END() SCOPE_END_IMPL(0)
+#define DEBUG_SCOPE_BEGIN() DEBUG_SCOPE_BEGIN_IMPL(__FUNCTION__, 0)
+#define DEBUG_SCOPE_END() DEBUG_SCOPE_END_IMPL(0)
 
-#define SCOPE_CALL_RET(x) ({ SCOPE_BEGIN_IMPL(#x, __LINE__); auto _ret = x; DEBUG_ROW(#x); SCOPE_END_IMPL(__LINE__); _ret; })
-#define SCOPE_CALL(x) do { SCOPE_BEGIN_IMPL(#x, __LINE__); x; DEBUG_ROW(#x); SCOPE_END_IMPL(__LINE__); } while(0)
+#define DEBUG_CALL_RET(x) ({ DEBUG_SCOPE_BEGIN_IMPL(#x, __LINE__); auto _ret = x; DEBUG_ROW(#x); DEBUG_SCOPE_END_IMPL(__LINE__); _ret; })
+#define DEBUG_CALL(x) do { DEBUG_SCOPE_BEGIN_IMPL(#x, __LINE__); x; DEBUG_ROW(#x); DEBUG_SCOPE_END_IMPL(__LINE__); } while(0)
 
 #define DEBUG_BREAK() debug_break(&g_debugger, __FUNCTION__, __FILE__, __LINE__)
 #define DEBUG_LOCATION() debug_location(&g_debugger, __FUNCTION__, __FILE__, __LINE__)

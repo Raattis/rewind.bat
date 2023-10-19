@@ -1856,19 +1856,18 @@ void inner_func()
 
 const char* instrument_test(State* state, int a, int b)
 {
-	INSTRUMENT_POINTER(state);
-	INSTRUMENT_VARIABLE(a);
-	INSTRUMENT_VARIABLE(b);
-	char c = 'b'; INSTRUMENT_VARIABLE(c);
-	short sh = -1234; INSTRUMENT_VARIABLE(sh);
-	float f = 123.456f; INSTRUMENT_VARIABLE(f);
-	double dbl = 123.456; INSTRUMENT_VARIABLE(dbl);
+	DEBUG_POINTER(state);
+	DEBUG_VARIABLE(a);
+	DEBUG_VARIABLE(b);
+	char c = 'b'; DEBUG_VARIABLE(c);
+	short sh = -1234; DEBUG_VARIABLE(sh);
+	float f = 123.456f; DEBUG_VARIABLE(f);
+	double dbl = 123.456; DEBUG_VARIABLE(dbl);
 
 	printf("sizeof(inner_func()) %lld\n", sizeof(inner_func()));
 
-	SCOPE_CALL(inner_func());
+	DEBUG_CALL(inner_func());
 	print_scope(get_scope(&g_debugger));
-
 
 	return "hi";
 }
@@ -1876,7 +1875,7 @@ const char* instrument_test(State* state, int a, int b)
 void test()
 {
 	DEBUG_LOCATION();
-	const char* str = "HI!"; INSTRUMENT_VARIABLE(str);
+	const char* str = "HI!"; DEBUG_VARIABLE(str);
 	DEBUG_LOCATION();
 	DEBUG_BREAK();
 	DEBUG_LOCATION();
@@ -1913,14 +1912,11 @@ void update(Communication* communication)
 	if (state->redraw_requested > 0)
 		state->redraw_requested--;
 
-	SCOPE_BEGIN();
-	DEBUG_LOCATION();
-	const char* str = SCOPE_CALL_RET("hiiiiiiiiiii\n"); INSTRUMENT_VARIABLE(str);
-	SCOPE_CALL(printf("%s", str));
-	DEBUG_LOCATION();
-	SCOPE_CALL(test());
-	DEBUG_LOCATION();
-	SCOPE_END();
+	DEBUG_SCOPE_BEGIN(); DEBUG_LOCATION();
+	const char* str = DEBUG_CALL_RET("hiiiiiiiiiii\n"); DEBUG_VARIABLE(str);
+	DEBUG_CALL(printf("%s", str)); DEBUG_LOCATION();
+	DEBUG_CALL(test()); DEBUG_LOCATION();
+	DEBUG_SCOPE_END();
 }
 
 #endif // RUNTIME_LOOP
