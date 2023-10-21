@@ -4,33 +4,33 @@ enum { DEBUGGER_TRACE = 0&&TRACE };
 
 #define user_printf printf
 
-typedef int(*DebugSprintf)(int indent, char*, const void*, const void*);
+typedef int(*DebugSnprintf)(int indent, char*, unsigned long long, const void*, const void*);
 
-int sprintf_indent(int indent, char* buffer)
+int snprintf_indent(int indent, char* buffer, unsigned long long size)
 {
-	return sprintf(buffer, "%s", "                      " + 20 - indent * 2);
+	return snprintf(buffer, size, "%s", "                      " + 20 - indent * 2);
 }
 
-int sprintf_single(int indent, char* buffer, const void* fmt, const void* ptr)
+int snprintf_single(int indent, char* buffer, unsigned long long size, const void* fmt, const void* ptr)
 {
 	dbg_printf("\n%s(indent:%d, buffer:%p, fmt:%s, ptr:%p), ", __FUNCTION__, indent, buffer, fmt?fmt:"null", ptr);
-	return sprintf(buffer, (const char*)fmt, *(long long*)ptr);
+	return snprintf(buffer, size, (const char*)fmt, *(long long*)ptr);
 }
 
-int sprintf_float(int indent, char* buffer, const void* fmt, const void* ptr)
+int snprintf_float(int indent, char* buffer, unsigned long long size, const void* fmt, const void* ptr)
 {
 	dbg_printf("\n%s(indent:%d, buffer:%p, fmt:%s, dbl:%f), ", __FUNCTION__, indent, buffer, fmt?fmt:"null", *(float*)ptr);
-	return sprintf(buffer, (const char*)fmt, *(float*)ptr);
+	return snprintf(buffer, size, (const char*)fmt, *(float*)ptr);
 }
 
-int sprintf_double(int indent, char* buffer, const void* fmt, const void* ptr)
+int snprintf_double(int indent, char* buffer, unsigned long long size, const void* fmt, const void* ptr)
 {
 	dbg_printf("\n%s(indent:%d, buffer:%p, fmt:%s, dbl:%f), ", __FUNCTION__, indent, buffer, fmt?fmt:"null", *(double*)ptr);
-	return sprintf(buffer, (const char*)fmt, *(double*)ptr);
+	return snprintf(buffer, size, (const char*)fmt, *(double*)ptr);
 }
 
 #define COMMA ,
-#define GENERIC_SPRINTF(Type, Ptr, Name, Fmt) Type: sprintf_ ## Name
+#define GENERIC_SNPRINTF(Type, Ptr, Name, Fmt) Type: snprintf_ ## Name
 #define GENERIC_FMT_ARGUMENT(Type, Ptr, Name, Fmt) Type: Fmt
 #define GENERIC_TYPE_NAME(Type, Ptr, Name, Fmt) Type: #Name
 #define GENERIC_TYPE_STR(Type, Ptr, Name, Fmt) Type: #Type
@@ -38,10 +38,10 @@ int sprintf_double(int indent, char* buffer, const void* fmt, const void* ptr)
 #define GENERIC_DEREF(Type, Ptr, Name, Fmt, x) Type: (x)
 
 #define _DEBUG_PRINTF_FUNC(x) _Generic((x), \
-	DEBUG_USER_TYPES(GENERIC_SPRINTF, COMMA), \
-	float: sprintf_float, \
-	double: sprintf_double, \
-	default: sprintf_single \
+	DEBUG_USER_TYPES(GENERIC_SNPRINTF, COMMA), \
+	float: snprintf_float, \
+	double: snprintf_double, \
+	default: snprintf_single \
 )
 
 #define DEBUG_DEFAULT_TYPES(X, SEP, ...) \
@@ -86,24 +86,25 @@ int sprintf_double(int indent, char* buffer, const void* fmt, const void* ptr)
 
 #define _DEBUG_VAR(var) \
 	do { \
-		DebugSprintf f = _DEBUG_PRINTF_FUNC(owner->var); \
+		DebugSnprintf f = _DEBUG_PRINTF_FUNC(owner->var); \
 		void* user_ptr = _DEBUG_FMT_ARGUMENT_PTR(owner->var); \
-		buffer += sprintf_indent(indent + 1, buffer); \
-		buffer += sprintf(buffer, #var " = "); \
-		buffer += f(indent + 1, buffer, user_ptr, &owner->var); \
-		buffer += sprintf(buffer, ",\n"); \
+		buffer += snprintf_indent(indent + 1, buffer, end - buffer); \
+		buffer += snprintf(buffer, end - buffer, #var " = "); \
+		buffer += f(indent + 1, buffer, end - buffer, user_ptr, &owner->var); \
+		buffer += snprintf(buffer, end - buffer, ",\n"); \
 	} while(0)
 
 #define _DEBUG_STRUCT(Name, VARS) \
-int sprintf_ ## Name(int indent, char *buffer, const void* user_ptr, const void* ptr) \
+int snprintf_ ## Name(int indent, char* buffer, unsigned long long size, const void* user_ptr, const void* ptr) \
 { \
 	dbg_printf("%s(indent:%d, buffer:%p, user_ptr:%s, ptr:%p), ", __FUNCTION__, indent, buffer, user_ptr?user_ptr:"null", ptr); \
 	const Name* owner = (const Name*)ptr; \
 	const char* original = buffer; \
-	buffer += sprintf(buffer, "[0x%llX] {\n", ptr); \
+	const char* end = buffer + size; \
+	buffer += snprintf(buffer, end - buffer, "[0x%llX] {\n", ptr); \
 	VARS(_DEBUG_VAR); \
-	buffer += sprintf_indent(indent, buffer); \
-	buffer += sprintf(buffer, "}"); \
+	buffer += snprintf_indent(indent, buffer, end - buffer); \
+	buffer += snprintf(buffer, end - buffer, "}"); \
 	return buffer - original; \
 }
 
@@ -117,7 +118,7 @@ typedef struct _t_Variable
 	// Type stuff
 	const char* type_name;
 	const char* type;
-	DebugSprintf sprintf_func;
+	DebugSnprintf snprintf_func;
 	const void* user_ptr;
 } Variable;
 
@@ -185,7 +186,7 @@ Scope* get_scope(Debugger* debugger)
 	return &debugger->scope[debugger->depth];
 }
 
-void push_variable(Scope* scope, const char* name, const void* address, int line, int is_arg, DebugSprintf sprintf_func, const void* user_ptr, const char* type, const char* type_name)
+void push_variable(Scope* scope, const char* name, const void* address, int line, int is_arg, DebugSnprintf snprintf_func, const void* user_ptr, const char* type, const char* type_name)
 {
 	Variable* variable = 0;
 	for (int i = 0; i < scope->count; ++i)
@@ -204,8 +205,8 @@ void push_variable(Scope* scope, const char* name, const void* address, int line
 	variable->address = address;
 	variable->assignment_line = line;
 	variable->is_arg = is_arg;
-	
-	variable->sprintf_func = sprintf_func;
+
+	variable->snprintf_func = snprintf_func;
 	variable->user_ptr = user_ptr;
 	variable->type_name = type_name;
 	variable->type = type;
@@ -225,9 +226,9 @@ int sprint_lines(char* output, int buffer_len, const char* filename, int start, 
 	{
 		char* line_start = output;
 		if (lineno != highlight)
-			output += sprintf(output, "%5d ", lineno);
+			output += snprintf(output, end - output, "%5d  ", lineno);
 		else
-			output += sprintf(output, "   -->");
+			output += snprintf(output, end - output, "   --> ");
 		FATAL(output < end, "Buffer overrun");
 
 		if (!fgets(output, end - output, file))
@@ -253,12 +254,12 @@ int print_lines(const char* filename, int start, int count, int highlight)
 	user_printf("%s", g_temp_buffer);
 }
 
-int sprintf_value_impl(char* buffer, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
+int snprintf_value_impl(char* buffer, unsigned long long size, DebugSnprintf snprintf_func, const void* user_ptr, const void* address)
 {
-	dbg_printf("%s(buffer:%p,func:%p,user_ptr:%p,address:%p), ", __FUNCTION__, buffer, sprintf_func, user_ptr, address);
+	dbg_printf("%s(buffer:%p,func:%p,user_ptr:%p,address:%p), ", __FUNCTION__, buffer, snprintf_func, user_ptr, address);
 	char* output = buffer;
 	dbg_printf("1, ");
-	output += sprintf_func(0, output, user_ptr, address);
+	output += snprintf_func(0, output, size, user_ptr, address);
 	dbg_printf("2, ");
 	return output - buffer;
 }
@@ -283,10 +284,10 @@ const char* get_line(const char* filename, int line)
 	return g_temp_buffer;
 }
 
-void print_variable(const char* name, DebugSprintf sprintf_func, const void* user_ptr, const void* address)
+void print_variable(const char* name, DebugSnprintf snprintf_func, const void* user_ptr, const void* address)
 {
 	char buffer[1024] = {0};
-	sprintf_value_impl(buffer, sprintf_func, user_ptr, address);
+	snprintf_value_impl(buffer, sizeof(buffer), snprintf_func, user_ptr, address);
 	user_printf("%s = %s\n", name, buffer);
 }
 
@@ -296,13 +297,12 @@ void print_variable(const char* name, DebugSprintf sprintf_func, const void* use
 void print_variable_from_scope(Scope* scope, const char* name)
 {
 	char buffer[1024] = {0};
-	char* output = buffer;
 	for (int i = 0; i < scope->count; ++i)
 	{
 		if (strcmp(scope->variables[i].buffer, name) != 0)
 			continue;
 		Variable v = scope->variables[i];
-		output += sprintf_value_impl(buffer, v.sprintf_func, v.user_ptr, v.address);
+		snprintf_value_impl(buffer, sizeof(buffer), v.snprintf_func, v.user_ptr, v.address);
 		user_printf("%s = %s\n", name, buffer);
 		return;
 	}
@@ -316,12 +316,11 @@ void print_variables(Scope* scope, int args)
 	char buffer[1024] = {0};
 	for (int i = 0; i < scope->count; ++i)
 	{
-		char* output = buffer;
 		Variable v = scope->variables[i];
 		dbg_printf("%d:%s,%sarg,'%s' ", i, v.buffer, v.is_arg ? "" : "not ", v.user_ptr);
 		if (v.is_arg != args)
 			continue;
-		output += sprintf_value_impl(output, v.sprintf_func, v.user_ptr, v.address);
+		snprintf_value_impl(buffer, sizeof(buffer), v.snprintf_func, v.user_ptr, v.address);
 		user_printf("%s = %s\n", v.buffer, buffer);
 	}
 }
@@ -370,7 +369,7 @@ void print_args(Scope* scope)
 		if (!v.is_arg)
 			continue;
 
-		sprintf_value_impl(buffer, v.sprintf_func, v.user_ptr, v.address);
+		snprintf_value_impl(buffer, sizeof(buffer), v.snprintf_func, v.user_ptr, v.address);
 		fit_long_string_in_args(buffer);
 		user_printf("%s:=%s", scope->variables[i].buffer, buffer);
 	}
@@ -478,7 +477,7 @@ void debug_interactively(Debugger* debugger)
 			int number = -1;
 			scanf(arg1, "%d", number);
 			if (number < 0)
-				ERROR_AND_RETRY("Invalid ignore count %d", number);
+				number = 1000000000;
 			debugger->ignore_counter = number;
 			continue;
 		}
@@ -545,7 +544,7 @@ void debug_interactively(Debugger* debugger)
 			user_printf("Breakpoint %d set to '%s:%d' '%s'\n", i, debugger->breakpoints[i].file, debugger->breakpoints[i].line);
 			continue;
 		}
-		else if (COMMAND("s") || COMMAND("step") || COMMAND("d") || COMMAND("down"))
+		else if (COMMAND("s") || COMMAND("step"))
 		{
 			debugger->break_depth_or_below = 999;
 			do_command_ll(location);
@@ -613,6 +612,72 @@ void debug_interactively(Debugger* debugger)
 		else if (COMMAND("l") || COMMAND("ll"))
 		{
 			do_command_ll(location);
+		}
+		else if (COMMAND("help"))
+		{
+			const char* commands[] = {
+				"unpause and continue execution\0c\0continue\0",
+				"print, insert or modify breakpoint 'b[ [[breakpoint_number ]file ]line]'\0b\0break\0",
+				"ignore a breakpoint once or near permanently 'ignore [breakpoint_number[ count]]'\0ignore\0",
+				"move the smallest possible distance and stop again\0s\0step\0",
+				"move to the next row in same or parent function\0n\0next\0",
+				"move to the parent function\0r\0return\0",
+				"navigate up/down the callstack\0u\0up\0d\0down\0",
+				"print source lines around current location\0l\0ll\0",
+				"print current location\0w\0where\0",
+				"print local variables\0ls\0locals\0",
+				"print function arguments\0a\0args\0",
+				"print function arguments and local variables\0lsa\0",
+				"print callstack\0t\0trace\0",
+				"print callstack with all variables\0deep\0all\0",
+				"exit application\0exit\0",
+				"print this message or more details on any one of the commands 'help [command]'\0help\0"};
+
+			int print_all = arg_count == 0;
+			if (arg_count > 1)
+				ERROR_AND_RETRY("help only expects 1 or two ")
+			int count = sizeof(commands) / sizeof(commands[0]);
+
+			int match = 0;
+			for (int i = 0; i < count; ++i)
+			{
+				const char* current = commands[i];
+				const char* desc = current;
+				int alias_count = 0;
+				const char* aliases[5] = {0};
+				while (*++current != 0); // Skip desc
+				while (*++current != 0) // Skip terminator
+				{
+					aliases[alias_count++] = current;
+					while (*++current != 0); // Skip until next alias
+				}
+
+				if (arg_count == 1)
+				{
+					for (int j = 0; j < alias_count; ++j)
+					{
+						if (strcmp(arg1, aliases[j]) != 0)
+							continue;
+						match = 1;
+						break;
+					}
+				}
+
+				if (match || arg_count == 0)
+				{
+					for (int j = 0; j < alias_count; ++j)
+					{
+						if (j > 0)
+							user_printf(", ", aliases[j]);
+						user_printf("%s", aliases[j]);
+					}
+					user_printf("\n\t%s\n", desc);
+					if (match)
+						break;
+				}
+			}
+			if (!match && arg_count == 1)
+				ERROR_AND_RETRY("No such command '%s'", arg1);
 		}
 		else
 		{
