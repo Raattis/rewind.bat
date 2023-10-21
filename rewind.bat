@@ -1722,10 +1722,10 @@ typedef struct
 	Tetris tetris;
 } State;
 
-#define DEBUG_USER_TYPES(X, SEP) \
-	X(State*, State, 0) SEP \
-	X(Tetris, Tetris, 0) SEP \
-	X(TetrisPiece, TetrisPiece, 0)
+#define DEBUG_USER_TYPES(X, SEP, ...) \
+	X(State, State*, State, 0, ##__VA_ARGS__) SEP \
+	X(Tetris, Tetris*, Tetris, 0, ##__VA_ARGS__) SEP \
+	X(TetrisPiece, TetrisPiece*, TetrisPiece, 0, ##__VA_ARGS__)
 
 #include "debugger.h"
 
@@ -1854,12 +1854,12 @@ void inner_func()
 dbg_loc	int i = 0;
 dbg_loc	for (i = 0; i < 12; ++i)
 dbg_loc	{
-dbg_loc		dbg_var(i);
+//dbg_loc		dbg_var(i);
 dbg_loc	}
 dbg_loc dbg_scp_end }
 
 const char* instrument_test(State* state, int a, int b)
-{dbg_scp dbg_args(3, (,state), (&,a), (&,b));
+{dbg_scp dbg_args(3, state, a, b);
 dbg_loc	char c = 'b'; dbg_var(c);
 dbg_loc	short sh = -1234; dbg_var(sh);
 dbg_loc	float f = 123.456f; dbg_var(f);
@@ -1872,9 +1872,9 @@ dbg_loc	inner_func();
 dbg_loc dbg_scp_end return "hi";
 }
 
-void test()
-{dbg_scp dbg_args(0);
-dbg_loc	const char* str = "HI!"; dbg_var(str);
+void test(int a, int b, State* state)
+{dbg_scp dbg_args(3, a, b, state);
+dbg_loc	const char* str2 = "HI!"; dbg_var(str2);
 dbg_loc	DEBUG_BREAK();
 dbg_loc}
 
@@ -1905,10 +1905,10 @@ void update(Communication* communication)
 		state->redraw_requested--;
 
 dbg_scp
-dbg_loc	const char* str = "hiiiiiiiiiii\n";	dbg_var(str);
+dbg_loc	const char* str1 = "hiiiiiiiiiii";	dbg_var(str1);
 dbg_loc	instrument_test(state, 0, 1);
-dbg_loc	printf("%s", str);
-dbg_loc	test();
+dbg_loc	printf("%s", str1);
+dbg_loc	test(2, 3, state);
 dbg_loc dbg_scp_end}
 
 #endif // RUNTIME_LOOP
