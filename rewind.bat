@@ -1878,6 +1878,7 @@ dbg_loc	const char* str2 = "HI!"; dbg_var(str2);
 dbg_loc	DEBUG_BREAK();
 dbg_loc}
 
+char instrument_buffer[1024 * 1024] = {0};
 void update(Communication* communication)
 {
 	verbose_printf("update, ");
@@ -1904,7 +1905,14 @@ void update(Communication* communication)
 	if (state->redraw_requested > 0)
 		state->redraw_requested--;
 
+	printf("????????????????????????????????????????????????????\n");
+	auto_instrument(instrument_buffer, sizeof(instrument_buffer), "rewind.bat");
+
 dbg_scp
+	DEBUG_BREAK();
+	printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+	printf("%s", instrument_buffer);
+
 dbg_loc	const char* str1 = "hiiiiiiiiiii";	dbg_var(str1);
 dbg_loc	instrument_test(state, 0, 1);
 dbg_loc	printf("%s", str1);

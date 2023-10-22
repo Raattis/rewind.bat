@@ -732,6 +732,188 @@ void debug_location(Debugger* debugger, _Debug_Local_Scope local_scope, int line
 	}
 }
 
+int next_line(const char* input)
+{
+	int result = 0;
+	while(!*input && *input++ != '\n')
+		++result;
+	return  result;
+}
+const char* stripl(const char* input)
+{
+	for (char c = *input; c; c = *++input)
+	{
+		switch(c)
+		{
+		case '\t':
+		case ' ':
+		case '\r':
+		case '\n': continue;
+		default: return input;
+		}
+	}
+	return  input;
+}
+
+int copy(char* buffer, const char* buffer_end, const char* input, const char* input_end)
+{
+	int result = 0;
+	for (;!input_end || input < input_end;)
+	{
+		char c = *input;
+		FATAL(buffer < buffer_end, "Buffer overrun");
+		FATAL(c != '\r', "No carriage returns allowed!");
+
+		*buffer = c;
+		if (!c)
+			break;
+		 ++buffer; ++input; ++result;
+	}
+	return result;
+}
+
+int is_alpha(char c)
+{
+	return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z');
+}
+
+int is_token_char(char c)
+{
+	return is_alpha(c) || ('0' <= c && c <= '9') || c == '_';
+}
+
+const char* keyword(const char* input, const char* tok)
+{
+	const char* at = strstr(input, tok);
+	if (!at)
+		return 0;
+	const char* before = input < at ? at - 1 : "\0";
+	const char* after = at + strlen(tok);
+	if (is_alpha(*before) || is_alpha(*after))
+		return 0;
+	return at;
+}
+
+const char* token_before(const char** token_end_ptr, const char* line_start)
+{
+	const char* token_end = *token_end_ptr;
+	const char* token_start = token_end;
+	while (token_start > line_start && !is_token_char(*token_start))
+		--token_start;
+	if (token_start == line_start)
+		return 0;
+	while (token_start > line_start && is_token_char(*(token_start - 1)))
+		--token_start;
+	return token_start;
+}
+
+void auto_instrument(char* buffer, size_t buffer_size, const char* filename)
+{
+	char line[16 * 1024] = {0};
+	char function_arguments[1024] = {0};
+	const char* buffer_start = buffer + buffer_size;
+	const char* buffer_end = buffer + buffer_size;
+	FILE* file = fopen(filename, "r");
+	if (!file)
+	{
+		fprintf(stderr, "'%s' doesn't exist", filename);
+		FATAL(0, "'%s' doesn't exist", filename);
+		return;
+	}
+	printf("Hello: '%s'\n", filename);
+
+	int func_started = 0;
+	int inline_scope_started = 0;
+	while (fgets(line, sizeof(line), file))
+	{
+		const char* buffer_line_start = buffer;
+		const char* a = line;
+more:
+		a = stripl(a);
+		char c = *a;
+		#define KEYWORD(w) const char* w ## _at = keyword(a, #w)
+		const char* assign_at = strstr(a, "=") != strstr(a, "==") ? strstr(a, "=") : 0;
+		KEYWORD(return);
+		KEYWORD(if);
+		KEYWORD(for);
+		KEYWORD(while);
+		KEYWORD(do);
+		KEYWORD(switch);
+		KEYWORD(case);
+		//printf("Start: %c, a:'%s', line:'%s'\n", c, a, line);
+		if (c =='{')
+		{
+			if (func_started)
+			{
+				func_started = 0;
+				buffer += copy(buffer, buffer_end, "{ dbg_scope", 0); ++a;
+				buffer += copy(buffer, buffer_end, function_arguments, 0);
+				goto more;
+			}
+			else
+			{
+				buffer += copy(buffer, buffer_end, line, 0);
+			}
+		}
+		else if(c == '}')
+		{
+			func_started = 0;
+			buffer += copy(buffer, buffer_end, "dbg_scope", 0);
+			buffer += copy(buffer, buffer_end, function_arguments, 0);
+			buffer += copy(buffer, buffer_end, a, 0);
+		}
+		else if(c == '/')
+		{
+			buffer += copy(buffer, buffer_end, a, 0);
+		}
+		else if(c == '#')
+		{
+			buffer += copy(buffer, buffer_end, line, 0);
+		}
+		else if(a == return_at)
+		{
+			func_started = 0;
+			buffer += copy(buffer, buffer_end, "dbg_loc dbg_scp_end ", 0);
+			buffer += copy(buffer, buffer_end, a, 0);
+		}
+		else if(is_alpha(c))
+		{
+			if (assign_at)
+			{
+				const char* eol = strchr(a, '\n');
+				buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
+				buffer += copy(buffer, buffer_end, a, eol);
+
+				const char* token_end = assign_at;
+				const char* tok = token_before(&token_end, a);
+				if (!tok)
+				{
+					buffer += copy(buffer, buffer_end, "NO TOKEN FOUND", 0);
+				}
+				else
+				{
+					buffer += copy(buffer, buffer_end, " dbg_var(", 0);
+					buffer += copy(buffer, buffer_end, tok, token_end);
+					buffer += copy(buffer, buffer_end, ")", 0);
+				}
+				if (eol)
+					buffer += copy(buffer, buffer_end, eol, 0);
+			}
+			else
+			{
+				buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
+				buffer += copy(buffer, buffer_end, a, 0);
+			}
+		}
+		if (strlen(buffer_line_start) > 0)
+			printf("out: '%c', %s", c, buffer_line_start);
+		else if (strlen(a) > 0) 
+			printf("EMPTY OUTPUT FOR: '%c', '%*s'\n", c, strlen(a) - 1, a);
+		else
+			printf("EMPTY INPUT\n");
+	}
+}
+
 #define DEBUG_VARIABLE_IMPL(var, is_arg) push_variable(get_scope(&g_debugger), #var, _DEBUG_TYPE_REF(var), __LINE__, is_arg, _DEBUG_PRINTF_FUNC(_DEBUG_TYPE_DEREF(var)), _DEBUG_FMT_ARGUMENT_PTR(_DEBUG_TYPE_DEREF(var)), _DEBUG_TYPE_NAME(_DEBUG_TYPE_DEREF(var)), _DEBUG_TYPE_STR(_DEBUG_TYPE_DEREF(var)))
 #define DEBUG_ARG_IMPL(var) DEBUG_VARIABLE_IMPL(var, 1)
 #define DEBUG_VARIABLE(var) DEBUG_VARIABLE_IMPL(var, 0)
