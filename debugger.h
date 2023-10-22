@@ -108,6 +108,14 @@ int snprintf_ ## Name(int indent, char* buffer, unsigned long long size, const v
 	return buffer - original; \
 }
 
+typedef struct _t_Type
+{
+	const char* readable_name;
+	const char* as_string;
+	DebugSnprintf snprintf_func;
+	const void* user_ptr;
+} Type;
+
 typedef struct _t_Variable
 {
 	char buffer[64];
@@ -115,11 +123,7 @@ typedef struct _t_Variable
 	int assignment_line;
 	int is_arg;
 
-	// Type stuff
-	const char* type_name;
-	const char* type;
-	DebugSnprintf snprintf_func;
-	const void* user_ptr;
+	Type type;
 } Variable;
 
 typedef struct _t_Location
@@ -186,7 +190,7 @@ Scope* get_scope(Debugger* debugger)
 	return &debugger->scope[debugger->depth];
 }
 
-void push_variable(Scope* scope, const char* name, const void* address, int line, int is_arg, DebugSnprintf snprintf_func, const void* user_ptr, const char* type, const char* type_name)
+void push_variable(Scope* scope, const char* name, const void* address, int line, int is_arg, DebugSnprintf snprintf_func, const void* user_ptr, const char* type, const char* readable_name)
 {
 	Variable* variable = 0;
 	for (int i = 0; i < scope->count; ++i)
@@ -206,10 +210,10 @@ void push_variable(Scope* scope, const char* name, const void* address, int line
 	variable->assignment_line = line;
 	variable->is_arg = is_arg;
 
-	variable->snprintf_func = snprintf_func;
-	variable->user_ptr = user_ptr;
-	variable->type_name = type_name;
-	variable->type = type;
+	variable->type.snprintf_func = snprintf_func;
+	variable->type.user_ptr = user_ptr;
+	variable->type.readable_name = readable_name;
+	variable->type.as_string = type;
 }
 
 int sprint_lines(char* output, int buffer_len, const char* filename, int start, int count, int highlight)
@@ -302,7 +306,7 @@ void print_variable_from_scope(Scope* scope, const char* name)
 		if (strcmp(scope->variables[i].buffer, name) != 0)
 			continue;
 		Variable v = scope->variables[i];
-		snprintf_value_impl(buffer, sizeof(buffer), v.snprintf_func, v.user_ptr, v.address);
+		snprintf_value_impl(buffer, sizeof(buffer), v.type.snprintf_func, v.type.user_ptr, v.address);
 		user_printf("%s = %s\n", name, buffer);
 		return;
 	}
@@ -317,10 +321,10 @@ void print_variables(Scope* scope, int args)
 	for (int i = 0; i < scope->count; ++i)
 	{
 		Variable v = scope->variables[i];
-		dbg_printf("%d:%s,%sarg,'%s' ", i, v.buffer, v.is_arg ? "" : "not ", v.user_ptr);
+		dbg_printf("%d:%s,%sarg,'%s' ", i, v.buffer, v.is_arg ? "" : "not ", v.type.user_ptr);
 		if (v.is_arg != args)
 			continue;
-		snprintf_value_impl(buffer, sizeof(buffer), v.snprintf_func, v.user_ptr, v.address);
+		snprintf_value_impl(buffer, sizeof(buffer), v.type.snprintf_func, v.type.user_ptr, v.address);
 		user_printf("%s = %s\n", v.buffer, buffer);
 	}
 }
@@ -369,7 +373,7 @@ void print_args(Scope* scope)
 		if (!v.is_arg)
 			continue;
 
-		snprintf_value_impl(buffer, sizeof(buffer), v.snprintf_func, v.user_ptr, v.address);
+		snprintf_value_impl(buffer, sizeof(buffer), v.type.snprintf_func, v.type.user_ptr, v.address);
 		fit_long_string_in_args(buffer);
 		user_printf("%s:=%s", scope->variables[i].buffer, buffer);
 	}
@@ -430,6 +434,7 @@ void debug_interactively(Debugger* debugger)
 		memset(input, 0, sizeof(input));
 		input_length = 0;
 
+		user_printf("---------------------------------------------\n");
 		user_printf("(debugger) ");
 		while (input_length < sizeof(input) && !strchr(input, '\n'))
 		{
@@ -547,13 +552,11 @@ void debug_interactively(Debugger* debugger)
 		else if (COMMAND("s") || COMMAND("step"))
 		{
 			debugger->break_depth_or_below = 999;
-			do_command_ll(location);
 			return;
 		}
 		else if (COMMAND("n") || COMMAND("next"))
 		{
 			debugger->break_depth_or_below = debugger->depth;
-			do_command_ll(location);
 			return;
 		}
 		else if (COMMAND("d") || COMMAND("down"))
