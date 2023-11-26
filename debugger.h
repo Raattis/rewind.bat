@@ -811,6 +811,7 @@ void auto_instrument(char* buffer, size_t buffer_size, const char* filename)
 {
 	char line[16 * 1024] = {0};
 	char function_arguments[1024] = {0};
+	char multiline_assignment_tok[1024] = {0};
 	const char* buffer_start = buffer + buffer_size;
 	const char* buffer_end = buffer + buffer_size;
 	FILE* file = fopen(filename, "r");
@@ -823,6 +824,7 @@ void auto_instrument(char* buffer, size_t buffer_size, const char* filename)
 	printf("Hello: '%s'\n", filename);
 
 	int func_started = 0;
+	int multiline_assignment = 0;
 	int inline_scope_started = 0;
 	while (fgets(line, sizeof(line), file))
 	{
@@ -831,22 +833,51 @@ void auto_instrument(char* buffer, size_t buffer_size, const char* filename)
 more:
 		a = stripl(a);
 		char c = *a;
-		#define KEYWORD(w) const char* w ## _at = keyword(a, #w)
+		
+		const char* semicolon_at = strstr(a, ":");
+		if (semicolon_at)
+		{
+			a = semicolon_at + 1;
+		}
 		const char* assign_at = strstr(a, "=") != strstr(a, "==") ? strstr(a, "=") : 0;
+		const char* colon_at = strstr(a, ";\n");
+
+		#define KEYWORD(w) const char* w ## _at = keyword(a, #w)
 		KEYWORD(return);
 		KEYWORD(if);
 		KEYWORD(for);
 		KEYWORD(while);
 		KEYWORD(do);
 		KEYWORD(switch);
-		KEYWORD(case);
 		//printf("Start: %c, a:'%s', line:'%s'\n", c, a, line);
-		if (c =='{')
+
+		multiline_assignment = !colon_at && !assign_at;
+		if (!colon_at && !assign_at)
+		{
+			buffer += copy(buffer, buffer_end, line, 0);
+		}
+		else if (multiline_assignment)
+		{
+			if (colon_at)
+			{
+				copy(buffer, buffer_end, line, strchr(line, '\n'));
+				copy(buffer, buffer_end, "dbg_var(", 0);
+				copy(buffer, buffer_end, multiline_assignment_tok, 0);
+				copy(buffer, buffer_end, ")\n", 0);
+				multiline_assignment = 0;
+			}
+			else
+			{
+				buffer += copy(buffer, buffer_end, line, 0);
+			}
+		}
+		else if (c =='{')
 		{
 			if (func_started)
 			{
 				func_started = 0;
-				buffer += copy(buffer, buffer_end, "{ dbg_scope", 0); ++a;
+				buffer += copy(buffer, buffer_end, line, a);
+				buffer += copy(buffer, buffer_end, "{dbg_scope", 0); ++a;
 				buffer += copy(buffer, buffer_end, function_arguments, 0);
 				goto more;
 			}
@@ -858,6 +889,7 @@ more:
 		else if(c == '}')
 		{
 			func_started = 0;
+			buffer += copy(buffer, buffer_end, line, a);
 			buffer += copy(buffer, buffer_end, "dbg_scope", 0);
 			buffer += copy(buffer, buffer_end, function_arguments, 0);
 			buffer += copy(buffer, buffer_end, a, 0);
@@ -873,17 +905,20 @@ more:
 		else if(a == return_at)
 		{
 			func_started = 0;
-			buffer += copy(buffer, buffer_end, "dbg_loc dbg_scp_end ", 0);
-			buffer += copy(buffer, buffer_end, a, 0);
+			buffer += copy(buffer, buffer_end, line, a);
+			buffer += copy(buffer, buffer_end, "{dbg_loc dbg_scp_end ", 0);
+			buffer += copy(buffer, buffer_end, a, strchr(a, '\n'));
+			buffer += copy(buffer, buffer_end, "}\n", 0);
+		}
+		else if(a == line)
+		{
+			buffer += copy(buffer, buffer_end, line, 0);
 		}
 		else if(is_alpha(c))
 		{
 			if (assign_at)
 			{
 				const char* eol = strchr(a, '\n');
-				buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
-				buffer += copy(buffer, buffer_end, a, eol);
-
 				const char* token_end = assign_at;
 				const char* tok = token_before(&token_end, a);
 				if (!tok)
@@ -892,21 +927,58 @@ more:
 				}
 				else
 				{
-					buffer += copy(buffer, buffer_end, " dbg_var(", 0);
-					buffer += copy(buffer, buffer_end, tok, token_end);
-					buffer += copy(buffer, buffer_end, ")", 0);
+					int is_new_var = 0;
+					if (memchr(tok, '[', token_end - tok))
+					{
+						token_end = memchr(tok, '[', token_end - tok);
+						is_new_var = 1;
+					}
+					else if (memchr(a, ' ', tok - a) || memchr(a, '*', tok - a))
+					{
+						is_new_var = 1;
+					}
+
+					if (is_new_var)
+					{
+						token_end = memchr(tok, ' ', token_end - tok) ? memchr(tok, ' ', token_end - tok) : token_end;
+						buffer += copy(buffer, buffer_end, line, a);
+						buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
+						buffer += copy(buffer, buffer_end, a, eol);
+						buffer += copy(buffer, buffer_end, " dbg_var(", 0);
+						buffer += copy(buffer, buffer_end, tok, token_end);
+						buffer += copy(buffer, buffer_end, ")", 0);
+					}
+					else
+					{
+						buffer += copy(buffer, buffer_end, line, a);
+						buffer += copy(buffer, buffer_end, "{dbg_loc ", 0);
+						buffer += copy(buffer, buffer_end, a, strchr(a, '\n'));
+						buffer += copy(buffer, buffer_end, "}\n", 0);
+					}
 				}
 				if (eol)
 					buffer += copy(buffer, buffer_end, eol, 0);
 			}
-			else
+			else if (return_at || if_at || for_at || while_at || do_at || switch_at)
 			{
 				buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
 				buffer += copy(buffer, buffer_end, a, 0);
 			}
+			else
+			{
+				buffer += copy(buffer, buffer_end, line, a);
+				buffer += copy(buffer, buffer_end, "{dbg_loc ", 0);
+				buffer += copy(buffer, buffer_end, a, strchr(a, '\n'));
+				buffer += copy(buffer, buffer_end, "}\n", 0);
+			}
 		}
+		else
+		{
+			buffer +=  copy(buffer, buffer_end, line, 0);
+		}
+
 		if (strlen(buffer_line_start) > 0)
-			printf("out: '%c', %s", c, buffer_line_start);
+			printf("out: '%c', line_start: %s", c, buffer_line_start);
 		else if (strlen(a) > 0) 
 			printf("EMPTY OUTPUT FOR: '%c', '%*s'\n", c, strlen(a) - 1, a);
 		else

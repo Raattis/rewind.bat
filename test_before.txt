@@ -1,0 +1,44 @@
+#include "asdf"
+
+void main(int argc, const char** args)
+{
+	long int thing = 10230123;
+	if (asdf)
+		print("yo!");
+	
+	thing = 10;
+	
+	for (int i = 0; i < thing; ++i)
+	{
+		thing += i;
+		
+		
+		switch(thing)
+		{
+		case omfg:
+			printf("wee");
+			break;
+		case omfg: printf("wee");
+		case hohoo:
+			printf("woo");
+			break;
+		defualt:
+			thing += 11;
+			break;
+		}
+		
+		if (true)
+			return thing;
+	}
+
+	return -1;
+}
+
+void test2()
+{
+	const char* args[] = {
+		"wee",
+		"hii",
+	};
+	main(1, "")
+}

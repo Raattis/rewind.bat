@@ -1214,6 +1214,7 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 
 	HWND hWnd = create_window(Window_Type_Gameplay);
 	const struct Tick_Data* prev_tick_data = 0;
+	int update_after_change = 1;
 
 	for (;;)
 	{
@@ -1238,6 +1239,13 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 
 		if (get_any_newer_file_timestamp(&newest_file_timestamp, headers_and_sources))
 			force_recompile = 1;
+
+		if (!force_recompile && !update_after_change)
+		{
+			printf(".");
+			Sleep(50);
+			continue;
+		}
 
 		if (force_recompile)
 		{
@@ -1455,6 +1463,8 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 			force_recompile = 0;
 			was_recompiled = 1;
 
+			update_after_change = 1;
+			printf("!!!!!!!!!!!\n");
 			continue;
 		}
 
@@ -1496,6 +1506,8 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 		if (new_tick.stop != 0)
 			break;
 
+		update_after_change = 0;
+		printf("?????????????\n");
 		Sleep(16);
 		continue;
 	}
@@ -1875,7 +1887,7 @@ dbg_loc dbg_scp_end return "hi";
 void test(int a, int b, State* state)
 {dbg_scp dbg_args(3, a, b, state);
 dbg_loc	const char* str2 = "HI!"; dbg_var(str2);
-dbg_loc	DEBUG_BREAK();
+dbg_loc	//DEBUG_BREAK();
 dbg_loc}
 
 char instrument_buffer[1024 * 1024] = {0};
@@ -1906,10 +1918,16 @@ void update(Communication* communication)
 		state->redraw_requested--;
 
 	printf("????????????????????????????????????????????????????\n");
-	auto_instrument(instrument_buffer, sizeof(instrument_buffer), "rewind.bat");
+	auto_instrument(instrument_buffer, sizeof(instrument_buffer), "test_before.txt");
+	printf("%s\n", instrument_buffer);
+	FILE* out = fopen("test_after.txt", "w");
+	fprintf(out, "%s", instrument_buffer);
+	fclose(out);
+	//Sleep(1000000)
+	//auto_instrument(instrument_buffer, sizeof(instrument_buffer), "rewind.bat");
 
 dbg_scp
-	DEBUG_BREAK();
+	//DEBUG_BREAK();
 	printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
 	printf("%s", instrument_buffer);
 
