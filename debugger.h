@@ -758,6 +758,28 @@ const char* stripl(const char* input)
 int copy(char* buffer, const char* buffer_end, const char* input, const char* input_end)
 {
 	int result = 0;
+	char* orig_buffer = buffer;
+	char* orig_input = input;
+	for (;!input_end || input < input_end;)
+	{
+		char c = *input;
+		FATAL(buffer < buffer_end, "Buffer overrun: buffer: %s, input: %s", orig_buffer, orig_input);
+		FATAL(c != '\r', "No carriage returns allowed!");
+
+		*buffer = c;
+		if (!c)
+			break;
+		 ++buffer; ++input; ++result;
+	}
+	return result;
+}
+
+int copy_debug(char* buffer, const char* buffer_end, const char* input, const char* input_end)
+{
+	if (1)
+		return 0;
+	
+	int result = 0;
 	for (;!input_end || input < input_end;)
 	{
 		char c = *input;
@@ -811,7 +833,8 @@ void auto_instrument(char* buffer, size_t buffer_size, const char* filename)
 {
 	char line[16 * 1024] = {0};
 	char function_arguments[1024] = {0};
-	char multiline_assignment_tok[1024] = {0};
+	char for_iterators[1024] = {0};
+	char multiline_assignment_suffix[1024] = {0};
 	const char* buffer_start = buffer + buffer_size;
 	const char* buffer_end = buffer + buffer_size;
 	FILE* file = fopen(filename, "r");
@@ -824,6 +847,7 @@ void auto_instrument(char* buffer, size_t buffer_size, const char* filename)
 	printf("Hello: '%s'\n", filename);
 
 	int func_started = 0;
+	int for_started = 0;
 	int multiline_assignment = 0;
 	int inline_scope_started = 0;
 	while (fgets(line, sizeof(line), file))
@@ -833,14 +857,15 @@ void auto_instrument(char* buffer, size_t buffer_size, const char* filename)
 more:
 		a = stripl(a);
 		char c = *a;
-		
-		const char* semicolon_at = strstr(a, ":");
-		if (semicolon_at)
+
+		const char* colon_at = strstr(a, ":");
+		if (colon_at)
 		{
-			a = semicolon_at + 1;
+			a = colon_at + 1;
 		}
 		const char* assign_at = strstr(a, "=") != strstr(a, "==") ? strstr(a, "=") : 0;
-		const char* colon_at = strstr(a, ";\n");
+		const char* open_bracket_at = strstr(a, "(");
+		const char* semicolon_at = strstr(a, ";\n");
 
 		#define KEYWORD(w) const char* w ## _at = keyword(a, #w)
 		KEYWORD(return);
@@ -851,35 +876,109 @@ more:
 		KEYWORD(switch);
 		//printf("Start: %c, a:'%s', line:'%s'\n", c, a, line);
 
-		multiline_assignment = !colon_at && !assign_at;
-		if (!colon_at && !assign_at)
+		if (!semicolon_at && assign_at && !for_at)
 		{
-			buffer += copy(buffer, buffer_end, line, 0);
-		}
-		else if (multiline_assignment)
-		{
-			if (colon_at)
+			if (multiline_assignment)
+				buffer += copy(buffer, buffer_end, "DOUBLE MULTILINE ASSIGNMENT?", 0);
+
+			multiline_assignment = 1;
+			buffer += copy_debug(buffer, buffer_end, "MULTILINE_ASSIGNMENT ", 0);
+
+			const char* eol = strchr(a, '\n');
+			const char* token_end = assign_at;
+			const char* tok = token_before(&token_end, a);
+			if (!tok)
 			{
-				copy(buffer, buffer_end, line, strchr(line, '\n'));
-				copy(buffer, buffer_end, "dbg_var(", 0);
-				copy(buffer, buffer_end, multiline_assignment_tok, 0);
-				copy(buffer, buffer_end, ")\n", 0);
-				multiline_assignment = 0;
+				buffer += copy(buffer, buffer_end, "NO TOKEN FOUND", 0);
 			}
 			else
 			{
-				buffer += copy(buffer, buffer_end, line, 0);
+				int is_new_var = 0;
+				if (memchr(tok, '[', token_end - tok))
+				{
+					token_end = memchr(tok, '[', token_end - tok);
+					is_new_var = 1;
+				}
+				else if (memchr(a, ' ', tok - a) || memchr(a, '*', tok - a))
+				{
+					is_new_var = 1;
+				}
+
+				if (is_new_var)
+				{
+					buffer += copy_debug(buffer, buffer_end, "ML_NEW_VAR ", 0);
+
+					token_end = memchr(tok, ' ', token_end - tok) ? memchr(tok, ' ', token_end - tok) : token_end;
+					buffer += copy(buffer, buffer_end, line, a);
+					buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
+					buffer += copy(buffer, buffer_end, a, 0);
+
+					char* suffix = multiline_assignment_suffix;
+					char* suffix_end = suffix + sizeof(multiline_assignment_suffix);
+					suffix += copy_debug(suffix, suffix_end, " NEW_VAR_ML_END", 0);
+					suffix += copy(suffix, suffix_end, " dbg_var(", 0);
+					suffix += copy(suffix, suffix_end, tok, token_end);
+					suffix += copy(suffix, suffix_end, ")", 0);
+					*suffix = 0;
+				}
+				else
+				{
+					buffer += copy_debug(buffer, buffer_end, "ML_OLD_VAR ", 0);
+
+					buffer += copy(buffer, buffer_end, line, a);
+					buffer += copy(buffer, buffer_end, "{dbg_loc OLD_VAR ", 0);
+					buffer += copy(buffer, buffer_end, a, strchr(a, '\n'));
+
+					char* suffix = multiline_assignment_suffix;
+					char* suffix_end = suffix + sizeof(multiline_assignment_suffix);
+					suffix += copy_debug(suffix, suffix_end, "OLD_VAR_ML_END", 0);
+					suffix += copy(suffix, suffix_end, "}\n", 0);
+					*suffix = 0;
+				}
 			}
 		}
 		else if (c =='{')
 		{
 			if (func_started)
 			{
+				buffer += copy_debug(buffer, buffer_end, "FUNC_START ", 0);
 				func_started = 0;
 				buffer += copy(buffer, buffer_end, line, a);
-				buffer += copy(buffer, buffer_end, "{dbg_scope", 0); ++a;
+				buffer += copy(buffer, buffer_end, "{ dbg_scope ", 0); ++a;
 				buffer += copy(buffer, buffer_end, function_arguments, 0);
+				strcpy(line, a);
+				printf("strcpy(line, a);: %s, %s", line, a);
 				goto more;
+			}
+			else if (for_started)
+			{
+				buffer += copy_debug(buffer, buffer_end, "FOR_START ", 0);
+				for_started = 0;
+				buffer += copy(buffer, buffer_end, line, a);
+				buffer += copy(buffer, buffer_end, "{dbg_scope FOR_START ", 0); ++a;
+				buffer += copy(buffer, buffer_end, for_iterators, 0);
+				strcpy(line, a);
+				goto more;
+			}
+			else
+			{
+				buffer += copy_debug(buffer, buffer_end, "OTHER_OPEN_BRACE ", 0);
+				buffer += copy(buffer, buffer_end, line, 0);
+			}
+		}
+		else if (!semicolon_at && !assign_at && !is_alpha(c) && !open_bracket_at)
+		{
+			buffer += copy_debug(buffer, buffer_end, "SKIP ", 0);
+			buffer += copy(buffer, buffer_end, line, 0);
+		}
+		else if (multiline_assignment)
+		{
+			if (semicolon_at)
+			{
+				buffer += copy(buffer, buffer_end, line, strchr(line, '\n'));
+				buffer += copy(buffer, buffer_end, " dbg_loc", 0);
+				buffer += copy(buffer, buffer_end, multiline_assignment_suffix, 0);
+				multiline_assignment = 0;
 			}
 			else
 			{
@@ -890,8 +989,10 @@ more:
 		{
 			func_started = 0;
 			buffer += copy(buffer, buffer_end, line, a);
+			buffer += copy_debug(buffer, buffer_end, "SCOPE_END ", 0);
 			buffer += copy(buffer, buffer_end, "dbg_scope", 0);
-			buffer += copy(buffer, buffer_end, function_arguments, 0);
+			if (func_started)
+				buffer += copy(buffer, buffer_end, function_arguments, 0);
 			buffer += copy(buffer, buffer_end, a, 0);
 		}
 		else if(c == '/')
@@ -905,18 +1006,70 @@ more:
 		else if(a == return_at)
 		{
 			func_started = 0;
+			buffer += copy_debug(buffer, buffer_end, "RETURN_MATCH ", 0);
 			buffer += copy(buffer, buffer_end, line, a);
 			buffer += copy(buffer, buffer_end, "{dbg_loc dbg_scp_end ", 0);
 			buffer += copy(buffer, buffer_end, a, strchr(a, '\n'));
 			buffer += copy(buffer, buffer_end, "}\n", 0);
 		}
-		else if(a == line)
-		{
-			buffer += copy(buffer, buffer_end, line, 0);
-		}
 		else if(is_alpha(c))
 		{
-			if (assign_at)
+			if(a == line && !semicolon_at)
+			{
+				char* args_start = strchr(a, '(');
+				if (args_start)
+				{
+					printf("ARGS: %s\n", args_start);
+					buffer += copy_debug(buffer, buffer_end, "FUNC_MATCH ", 0);
+					buffer += copy(buffer, buffer_end, line, 0);
+					func_started = 1;
+
+					char* args = function_arguments;
+					char* args_end = args + sizeof(function_arguments);
+					args += copy(args, args_end, "dbg_var(", 0);
+					copy(args, args_end, ")", 0);
+					char* token_start = args_start + 1;
+					char* token_end = token_start + 1;
+					for (; *token_end != '0'; ++token_end)
+					{
+						char t = *token_end;
+						if (t == ',' || t == ')')
+						{
+							++token_end;
+							args += copy(args, args_end, token_start, token_end);
+							token_start = token_end;
+							if (t == ')')
+							{
+								printf("END> '%s'", args);
+								break;
+							}
+						}
+						else if (!is_token_char(t))
+						{
+							token_start = token_end + 1;
+						}
+						else
+						{
+							
+						}
+					}
+					a = token_end;
+					strcpy(line, a);
+					goto more;
+				}
+				else
+				{
+					buffer += copy_debug(buffer, buffer_end, "NOT_A_FUNC ", 0);
+					buffer += copy(buffer, buffer_end, line, 0);
+				}
+			}
+			else if (for_at)
+			{
+				buffer += copy_debug(buffer, buffer_end, "FOR_MATCH ", 0);
+				buffer += copy(buffer, buffer_end, line, a);
+				buffer += copy(buffer, buffer_end, a, 0);
+			}
+			else if (assign_at)
 			{
 				const char* eol = strchr(a, '\n');
 				const char* token_end = assign_at;
@@ -924,6 +1077,7 @@ more:
 				if (!tok)
 				{
 					buffer += copy(buffer, buffer_end, "NO TOKEN FOUND", 0);
+					buffer += copy(buffer, buffer_end, line, 0);
 				}
 				else
 				{
@@ -940,6 +1094,8 @@ more:
 
 					if (is_new_var)
 					{
+						buffer += copy_debug(buffer, buffer_end, "NEW_VAR_MATCH ", 0);
+
 						token_end = memchr(tok, ' ', token_end - tok) ? memchr(tok, ' ', token_end - tok) : token_end;
 						buffer += copy(buffer, buffer_end, line, a);
 						buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
@@ -950,6 +1106,8 @@ more:
 					}
 					else
 					{
+						buffer += copy_debug(buffer, buffer_end, "ASSIGNMENT_MATCH ", 0);
+
 						buffer += copy(buffer, buffer_end, line, a);
 						buffer += copy(buffer, buffer_end, "{dbg_loc ", 0);
 						buffer += copy(buffer, buffer_end, a, strchr(a, '\n'));
@@ -961,11 +1119,19 @@ more:
 			}
 			else if (return_at || if_at || for_at || while_at || do_at || switch_at)
 			{
+				buffer += copy_debug(buffer, buffer_end, "KEYWORD ", 0);
+				buffer += copy(buffer, buffer_end, line, a);
 				buffer += copy(buffer, buffer_end, "dbg_loc ", 0);
 				buffer += copy(buffer, buffer_end, a, 0);
 			}
+			else if (strlen(a) == 0)
+			{
+				buffer += copy_debug(buffer, buffer_end, "EMPTY ", 0);
+				buffer += copy(buffer, buffer_end, line, 0);
+			}
 			else
 			{
+				buffer += copy_debug(buffer, buffer_end, "DEFAULT ", 0);
 				buffer += copy(buffer, buffer_end, line, a);
 				buffer += copy(buffer, buffer_end, "{dbg_loc ", 0);
 				buffer += copy(buffer, buffer_end, a, strchr(a, '\n'));
@@ -974,12 +1140,13 @@ more:
 		}
 		else
 		{
-			buffer +=  copy(buffer, buffer_end, line, 0);
+			buffer += copy(buffer, buffer_end, "NO_MATCH ", 0);
+			buffer += copy(buffer, buffer_end, line, 0);
 		}
 
 		if (strlen(buffer_line_start) > 0)
 			printf("out: '%c', line_start: %s", c, buffer_line_start);
-		else if (strlen(a) > 0) 
+		else if (strlen(a) > 0)
 			printf("EMPTY OUTPUT FOR: '%c', '%*s'\n", c, strlen(a) - 1, a);
 		else
 			printf("EMPTY INPUT\n");

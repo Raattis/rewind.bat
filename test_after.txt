@@ -1,36 +1,40 @@
 #include "asdf"
 
 void main(int argc, const char** args)
-{
+
+{ dbg_scope dbg_var(argc,args)
 	dbg_loc long int thing = 10230123; dbg_var(thing)
-	if (asdf)
+	dbg_loc if (asdf)
 		{dbg_loc print("yo!");}
 	
 	{dbg_loc thing = 10;}
 
 	
-	dbg_loc for (int i = 0; i < thing; ++i) dbg_var(i)
+	dbg_loc char* asdf[] = { "hm;?",
+		"asdf",
+		"hehe"
+	}; dbg_loc dbg_var(asdf)	
+	for (int i = 0; i < thing; ++i)
 	{
 		{dbg_loc thing += i;}
 
-		
-		
-		switch(thing)
+
+		dbg_loc switch(thing)
 		{
-		case omfg:
+		case omfg:{dbg_loc }
 			{dbg_loc printf("wee");}
 			{dbg_loc break;}
 		case omfg:{dbg_loc  printf("wee");}
-		case hohoo:
+		case hohoo:{dbg_loc }
 			{dbg_loc printf("woo");}
 			{dbg_loc break;}
-		defualt:
+		defualt:{dbg_loc }
 			{dbg_loc thing += 11;}
 
 			{dbg_loc break;}
 		}
 		
-		if (true)
+		dbg_loc if (true)
 			{dbg_loc dbg_scp_end return thing;}
 	}
 
@@ -38,10 +42,10 @@ void main(int argc, const char** args)
 }
 
 void test2()
-{
-	dbg_loc const char* args[] = { dbg_var(args)
+NO_MATCH ;
+{ dbg_scope dbg_var()
+	dbg_loc const char* args[] = {
 		"wee",
 		"hii",
-	dbg_scope};
-	main(1, "")
+	}; dbg_loc dbg_var(args)	{dbg_loc main(1, "")}
 }

@@ -1243,7 +1243,7 @@ void run_recompilation_loop(Execution_Buffers execution_buffers)
 		if (!force_recompile && !update_after_change)
 		{
 			printf(".");
-			Sleep(50);
+			Sleep(200);
 			continue;
 		}
 
