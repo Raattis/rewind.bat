@@ -58,7 +58,7 @@ if not exist %compiler_executable% (
 		if not exist %compiler_zip_name% (
 			echo Download Tiny C Compiler manually from http://download.savannah.gnu.org/releases/tinycc/ and unzip it here.
 			pause
-			exit 1
+			exit /b 1
 		)
 	)
 
@@ -72,19 +72,22 @@ if not exist %compiler_executable% (
 			echo Unzipping %compiler_zip_name% did not yield the expected "tcc" folder.
 			echo Move the contents of the archive here manually so that tcc.exe is in the same folder as %~n0%~x0.
 			pause
-			exit 1
+			exit /b 1
 		)
 	)
 
 	echo Tiny C Compiler Acquired!
 )
 
+rem Add tcc subfolder to path to enable finding the lib and dll files
+set PATH=%PATH%;tcc
+
 (
 	echo static const char* b_source_filename = "%~n0%~x0";
 	echo #line 0 "%~n0%~x0"
 	echo #if GOTO_BOOTSTRAP_BUILDER
 	type %~n0%~x0
-) | %compiler_executable% -o%~n0.exe -DSHARED_PREFIX -DSOURCE -bench -Itcc/libtcc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Ltcc/libtcc -llibtcc -
+) | %compiler_executable% -o%~n0.exe -DSHARED_PREFIX -DSOURCE -bench -Ilibtcc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Llibtcc -llibtcc -
 rem ) | %compiler_executable% -run -nostdinc -lmsvcrt -lkernel32 -luser32 -lgdi32 -Itcc/include -Itcc/include/winapi -Itcc/libtcc -Ltcc/libtcc -llibtcc -DSHARED_PREFIX -DSOURCE -bench -
 
 
@@ -111,7 +114,7 @@ if %errorlevel% == 0 (
 %~n0.exe
 
 :end
-exit errorlevel
+exit /b errorlevel
 
 */
 #endif // BOOTSTRAP_BUILDER
